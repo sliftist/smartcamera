@@ -227,3 +227,27 @@ anything else in the file, spaces included, is part of the password.
 
 Coming back takes effect at once, since waiting to resume is the annoying direction. Going away waits
 three seconds, roughly two answers, because one bad answer should not stop your music.
+
+## History
+
+The day files are small enough to read whole and work out anything you like from.
+
+    GET /history?days=7   -> { days, events }   the raw lines, replayed by you
+    GET /stats?days=7     -> the same, summarised per condition
+
+A summary carries, for each condition, how long it was true, that as a fraction, and how many
+separate times it happened. Plus `trackedMs`, which is the denominator, and `spanMs`, which is the
+wall clock the files cover.
+
+Those last two are different on purpose, and the difference is the point.
+
+`trackedMs` counts only the time something was actually running. A gap longer than 150 seconds is
+read as the service having been away and is left out. Without that, whatever happened to be true when
+it stopped would be credited with every hour it was off, and a percentage would be a fiction. This is
+also why the recorder writes a heartbeat: without a line at least once a minute, a still hour and an
+hour of downtime look identical in the file.
+
+`instances` counts occurrences, not rounds. An hour at the desk is one instance, not two thousand.
+Coming back after downtime counts as a new one, which is what it looks like from here.
+
+The page reads this once on load and shows it as a table.

@@ -7,6 +7,7 @@ import { dayStamp, millisecondStamp } from "./src/timestamps";
 import { buildPrompt, parseAnswers, diffAnswers, letterFor, normalizeQuestion, DEFAULT_QUESTIONS, MAX_QUESTIONS, MAX_QUESTION_LENGTH } from "./src/questions";
 import { readPassword, writePassword, passwordMatches, offeredPassword } from "./src/password";
 import { isLocalAddress } from "./src/network";
+import { readHistory, summarise } from "./src/history";
 
 const EYE2_URL = "http://127.0.0.1:8770";
 const PORT = 8772;
@@ -38,6 +39,14 @@ const FRAME_BUFFER_MS = 30_000;
  * only every 1.4s and, worse, tied what is kept to what the model happened to be asked about.
  */
 const FRAME_PULL_MS = 1000;
+/**
+ * At most this long between log lines, even when nothing changes.
+ *
+ * Only writing on change makes a still hour look exactly like an hour when nothing was running, and
+ * telling those apart is the whole denominator of "true this much of the time". One line a minute is
+ * nothing next to what it buys.
+ */
+const HEARTBEAT_MS = 60_000;
 const TRAINING_DIRECTORY = path.join(__dirname, "training");
 const MAX_NOTE_LENGTH = 500;
 /** Optional. With no such file nothing is checked; set one with `yarn password`. */
@@ -103,6 +112,8 @@ class Recorder {
     private recent: Entry[] = [];
     private day = "";
     private stream: fs.WriteStream | undefined;
+    /** So a quiet stretch still leaves a mark, which is what makes downtime tellable from stillness. */
+    private lastWroteAtMs = 0;
     private listeners = new Set<Listener>();
     private frames: BufferedFrame[] = [];
     rounds = 0;
@@ -298,6 +309,13 @@ class Recorder {
             this.stream = fs.createWriteStream(path.join(LOG_DIRECTORY, `${today}.jsonl`), { flags: "a" });
             this.day = today;
             this.stream.write(JSON.stringify({ at: entry.at, state: entry.state }) + "\n");
+            this.lastWroteAtMs = entry.at;
+        } else if (entry.at - this.lastWroteAtMs >= HEARTBEAT_MS) {
+            // Writing only on change makes a quiet hour indistinguishable from an hour when nothing
+            // was running, and the difference is the whole denominator for "how much of the time".
+            // A line at least this often bounds a gap, so anything longer than one is downtime.
+            this.stream?.write(JSON.stringify({ at: entry.at, state: entry.state }) + "\n");
+            this.lastWroteAtMs = entry.at;
         } else if (entry.added.length > 0 || entry.removed.length > 0) {
             const line: { at: number; added?: string[]; removed?: string[] } = { at: entry.at };
             if (entry.added.length > 0) {
@@ -307,6 +325,7 @@ class Recorder {
                 line.removed = entry.removed;
             }
             this.stream?.write(JSON.stringify(line) + "\n");
+            this.lastWroteAtMs = entry.at;
         }
         this.recent.push(entry);
         if (this.recent.length > RECENT_LIMIT) {
@@ -465,6 +484,11 @@ td { border-top: 1px solid var(--line); padding: 7px 6px; vertical-align: top; }
              background: none; color: inherit; min-width: 170px; }
 #pinNote { margin-bottom: 16px; min-height: 1.2em; }
 .viewbar { margin: 4px 0 8px; }
+#historyTable { width: auto; min-width: min(560px, 100%); margin-bottom: 6px; }
+#historyTable td { padding: 5px 14px 5px 0; }
+#historyTable td.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+#historyTable .bar { display: inline-block; height: 7px; border-radius: 4px; background: #d9822b; vertical-align: middle; }
+#statsNote { margin-bottom: 16px; }
 .viewbar button { opacity: .8; }
 .badge { display: inline-block; border-radius: 4px; padding: 1px 7px; margin-right: 6px; font-size: 11px;
          text-transform: uppercase; letter-spacing: .05em; background: #8882; opacity: .8; }
@@ -481,6 +505,9 @@ tr.fresh { animation: in .35s ease-out; }
      in a cafe, and hiding it only buys a typo you cannot see. -->
 <form id="secret"><input id="secretValue" type="text" placeholder="leave empty to remove" autocomplete="off" spellcheck="false"><button type="submit">set</button></form>
 <div id="secretNote" class="quiet"></div>
+<h2>history <span id="statsSpan" class="quiet"></span></h2>
+<table id="historyTable"></table>
+<div id="statsNote" class="quiet"></div>
 <h2>resolution shown to the model</h2>
 <div id="res"></div>
 <div id="resNote" class="quiet"></div>
@@ -613,6 +640,60 @@ async function showResolution(budget) {
         + ", keeping the aspect ratio, so the camera's 1920x1080 goes in a little narrower than that."
         + " times are what a frame took when measured.";
     note.className = "quiet";
+}
+
+function duration(ms) {
+    const hours = ms / 3600000;
+    if (hours >= 1) {
+        return hours.toFixed(1) + "h";
+    }
+    const minutes = ms / 60000;
+    return minutes >= 1 ? minutes.toFixed(0) + "m" : Math.round(ms / 1000) + "s";
+}
+
+/**
+ * Read once on load. The files are small, being changes and a heartbeat, so this is a fetch and a
+ * walk rather than anything that needs its own storage.
+ */
+async function showHistory() {
+    const table = document.getElementById("historyTable");
+    const note = document.getElementById("statsNote");
+    const span = document.getElementById("statsSpan");
+    let summary;
+    try {
+        summary = await (await api("/stats?days=7")).json();
+    } catch (error) {
+        return;
+    }
+    span.textContent = summary.days.length + " day" + (summary.days.length === 1 ? "" : "s")
+        + ", " + duration(summary.trackedMs) + " actually watched";
+    table.replaceChildren();
+    for (const item of summary.conditions) {
+        const tr = document.createElement("tr");
+        const what = document.createElement("td");
+        what.textContent = item.condition;
+        const share = document.createElement("td");
+        share.className = "num";
+        share.textContent = (item.fraction * 100).toFixed(1) + "%";
+        const bar = document.createElement("td");
+        const fill = document.createElement("span");
+        fill.className = "bar";
+        fill.style.width = Math.max(1, Math.round(item.fraction * 120)) + "px";
+        bar.append(fill);
+        const time = document.createElement("td");
+        time.className = "num";
+        time.textContent = duration(item.trueMs);
+        const times = document.createElement("td");
+        times.className = "num";
+        // Occurrences, not rounds: an hour at the desk is one of these, not two thousand.
+        times.textContent = item.instances + (item.instances === 1 ? " time" : " times");
+        tr.append(what, share, bar, time, times);
+        table.append(tr);
+    }
+    note.textContent = summary.conditions.length === 0
+        ? "no history yet"
+        : "share of the time it was being watched, not of the wall clock: a stretch where nothing was"
+            + " running is left out rather than credited to whatever was true when it stopped.";
 }
 
 async function showPasswordState() {
@@ -975,6 +1056,7 @@ function connect() {
 }
 showPasswordState();
 showResolution();
+showHistory();
 setView(everything);
 connect();
 </script>`;
@@ -1034,6 +1116,22 @@ async function main() {
         if (url.pathname === "/status") {
             response.writeHead(200, { "Content-Type": "application/json" });
             response.end(JSON.stringify(recorder.state));
+            return;
+        }
+        // The raw lines, for anything that wants to do its own arithmetic. They are small: a day of
+        // this is tens of kilobytes, because only changes and a minute heartbeat are written.
+        if (url.pathname === "/history") {
+            const days = Math.min(365, Math.max(1, Number(url.searchParams.get("days") ?? 7)));
+            const { events, days: names } = readHistory(LOG_DIRECTORY, days);
+            response.writeHead(200, { "Content-Type": "application/json" });
+            response.end(JSON.stringify({ days: names, events }));
+            return;
+        }
+        if (url.pathname === "/stats") {
+            const days = Math.min(365, Math.max(1, Number(url.searchParams.get("days") ?? 7)));
+            const { events, days: names } = readHistory(LOG_DIRECTORY, days);
+            response.writeHead(200, { "Content-Type": "application/json" });
+            response.end(JSON.stringify(summarise(events, names)));
             return;
         }
         // eye2 owns the setting and only listens on loopback, so this is the way to it from a phone.

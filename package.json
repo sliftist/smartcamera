@@ -57,7 +57,8 @@
         "daemon:logs": "./scripts/eyed logs",
         "test:questions": "typenode ./scripts/questions.test.ts",
         "password": "typenode ./scripts/password.ts",
-        "test:client": "typenode ./scripts/eyeClient.test.ts"
+        "test:client": "typenode ./scripts/eyeClient.test.ts",
+        "test:history": "typenode ./scripts/history.test.ts"
     },
     "dependencies": {
         "jpeg-js": "*",
