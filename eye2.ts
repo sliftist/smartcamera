@@ -413,6 +413,10 @@ class Server {
                         view: view.name,
                         prompt: request.prompt,
                         answer: result.answer,
+                        // Only in debug, where a frame is kept at all. A caller that wants to see what
+                        // an answer was actually looking at has no other way to find it, since the
+                        // number cycles and the next frame will take the name back.
+                        frameFile,
                         frameAt: new Date(captured.capturedAtMs).toISOString(),
                         instant: captured.instant,
                         decodeMs: captured.decodeMs,
