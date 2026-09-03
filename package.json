@@ -60,7 +60,8 @@
         "test:client": "typenode ./scripts/eyeClient.test.ts",
         "test:history": "typenode ./scripts/history.test.ts",
         "test:comparison": "typenode ./scripts/comparison.test.ts",
-        "test": "yarn test:questions && yarn test:history && yarn test:comparison"
+        "test": "yarn test:questions && yarn test:history && yarn test:comparison",
+        "tune": "typenode ./scripts/tuneServer.ts"
     },
     "dependencies": {
         "jpeg-js": "*",

@@ -27,8 +27,13 @@ ROCm 7.2.4 from AMD's own repository, because Ubuntu's `rocminfo` is 5.7 and far
 ## Building llama.cpp
 
     HIPCXX="$(hipconfig -l)/clang" HIP_PATH="$(hipconfig -R)" \
-        cmake -S . -B build -G Ninja -DGGML_HIP=ON -DAMDGPU_TARGETS=gfx1200 -DCMAKE_BUILD_TYPE=Release
+        cmake -S . -B build -G Ninja -DGGML_HIP=ON -DAMDGPU_TARGETS=gfx1200 \
+              -DGGML_HIP_ROCWMMA_FATTN=ON -DCMAKE_BUILD_TYPE=Release
     cmake --build build -j12
+
+GGML_HIP_ROCWMMA_FATTN is worth the flag. It builds attention against rocWMMA, which uses the matrix
+cores this card actually has, and it is measured below at about 120ms a frame. The headers ship with
+ROCm, so there is nothing else to install.
 
 ## Weights
 
@@ -69,3 +74,42 @@ Encoding the image is most of a frame's cost. llama.cpp does not report it separ
 token image prefills at about 900 tok/s where the same length of plain text runs at about 2200 tok/s,
 which puts the vision encoder near 570 ms of a 970 ms frame. Anything that makes frames cheaper has
 to come from the encoder or from handing it fewer pixels.
+
+## Where a frame's time goes
+
+Measured with everything else off the card, on the frame eye2 actually sends (1252x704), asking the
+nine default questions. `yarn tune` reproduces it.
+
+| stage | Q8_0 | what it is |
+| --- | --- | --- |
+| vision | 555 ms | the ViT encoding the image into about 880 tokens |
+| prefill | 439 ms | reading those tokens plus the questions |
+| generate | 529 ms | writing 19 tokens of answer |
+| total | 1523 ms | |
+
+Three roughly equal thirds, which is why there is no single thing to fix.
+
+The card is not being wasted: 100% busy, 3.1 GHz, 202 W under this load. Whatever is left has to come
+from better kernels or less work, not from unlocking the hardware.
+
+What was tried and did not help: flash attention forced on rather than auto, and prompt batch sizes
+from 512 up to 4096. All within noise, because prefill is not where the bottleneck is.
+
+What did help:
+
+| change | total | note |
+| --- | --- | --- |
+| baseline | 1647 ms | |
+| rocWMMA attention | 1523 ms | mostly vision, 655 to 555 |
+| rocWMMA + Q4_K_M | 1416 ms | generate 529 to 347, prefill 439 to 495 |
+
+Q4 is not adopted: it trades answer quality for 107 ms, and Q8 is within noise of lossless while Q4
+is not. The build flag is adopted, since it costs nothing.
+
+There is no fp8 to try. GGUF has no 8-bit float weight type at all; the only 8-bit type is Q8_0, and
+the 4-bit floats MXFP4 and NVFP4 are the only float quantizations there are. Q8_0 would beat an fp8
+of the same size anyway, having 8 mantissa bits with a per-block scale against e4m3's three.
+
+The remaining lever is a smaller model. Qwen3-VL exists at 4B and 2B, and both would cut generate and
+prefill close to proportionally while leaving vision alone, since the vision tower is the same size.
+That is a quality decision rather than a tuning one.
