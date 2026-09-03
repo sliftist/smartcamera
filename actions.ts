@@ -4,7 +4,7 @@ import * as path from "path";
 import { WebSocketServer, WebSocket } from "ws";
 import { formatDateTime } from "socket-function/src/formatting/format";
 import { dayStamp, millisecondStamp } from "./src/timestamps";
-import { buildPrompt, parseAnswers, diffAnswers, letterFor, normalizeQuestion, MAX_QUESTIONS, MAX_QUESTION_LENGTH } from "./src/questions";
+import { buildPrompt, parseAnswers, diffAnswers, letterFor, normalizeQuestion, DEFAULT_QUESTIONS, MAX_QUESTIONS, MAX_QUESTION_LENGTH } from "./src/questions";
 import { readPassword, writePassword, passwordMatches, offeredPassword } from "./src/password";
 import { isLocalAddress } from "./src/network";
 
@@ -40,8 +40,6 @@ const FRAME_BUFFER_MS = 30_000;
 const FRAME_PULL_MS = 1000;
 const TRAINING_DIRECTORY = path.join(__dirname, "training");
 const MAX_NOTE_LENGTH = 500;
-/** The questionnaire. Kept beside the log so it survives a restart. */
-const QUESTIONS_FILE = path.join(LOG_DIRECTORY, "questions.json");
 /** Optional. With no such file nothing is checked; set one with `yarn password`. */
 export const PASSWORD_FILE = path.join(LOG_DIRECTORY, "password.json");
 
@@ -103,20 +101,10 @@ class Recorder {
     }
 
     private loadQuestions() {
-        try {
-            const parsed = JSON.parse(fs.readFileSync(QUESTIONS_FILE, "utf8")) as unknown;
-            if (Array.isArray(parsed)) {
-                this.questions = parsed
-                    .filter((item): item is string => typeof item === "string")
-                    .map(normalizeQuestion)
-                    .filter(Boolean);
-            }
-        } catch {
-            // Not written yet, or written badly. Either way there is nothing to ask.
-        }
-        log(this.questions.length > 0
-            ? `asking ${this.questions.length} question${this.questions.length === 1 ? "" : "s"} of every frame`
-            : `no questions configured yet, so nothing is being asked`);
+        // Deliberately not read from disk. See DEFAULT_QUESTIONS: a list that persisted only ever
+        // grew, and every entry in it costs tokens on every frame forever.
+        this.questions = [...DEFAULT_QUESTIONS];
+        log(`asking the ${this.questions.length} default questions; anything else is added by whoever wants it`);
     }
 
     listQuestions(): string[] {
@@ -139,7 +127,7 @@ class Recorder {
             throw new Error(`At most ${MAX_QUESTIONS} questions can be asked at once, one per letter`);
         }
         this.questions.push(item);
-        this.saveQuestions();
+        this.questionsChanged();
         log(`now asking ${JSON.stringify(item)}`);
         return this.listQuestions();
     }
@@ -149,13 +137,13 @@ class Recorder {
         this.questions = this.questions.filter(candidate => candidate !== item);
         // Its last answer goes with it, so re-adding it later starts clean rather than resuming.
         this.yes = this.yes.filter(candidate => candidate !== item);
-        this.saveQuestions();
+        this.questionsChanged();
         log(`no longer asking ${JSON.stringify(item)}`);
         return this.listQuestions();
     }
 
-    private saveQuestions() {
-        fs.writeFileSync(QUESTIONS_FILE, JSON.stringify(this.questions, undefined, 2));
+    /** Nothing is written; this only tells everyone the list moved so they can put theirs back. */
+    private questionsChanged() {
         for (const listener of this.listeners) {
             listener(undefined);
         }

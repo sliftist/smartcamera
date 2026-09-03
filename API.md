@@ -28,7 +28,23 @@ going on in the room.
       -H 'Content-Type: application/json' -d '{"question":"is a hand on the mouse"}'
 
 A new question is asked of the next frame, about a second later. Up to 26 of them, one per letter,
-each at most 120 characters, kept across restarts. With none configured nothing is asked at all.
+each at most 120 characters.
+
+The list is not kept on disk. A restart goes back to the defaults below, and anything else is there
+only because something asked for it and is still around to ask again. That is what stops the list
+growing forever: every experiment anyone ever ran would otherwise stay in the prompt, and each entry
+costs prompt and output tokens on every single frame. A client re-registers on connect anyway, so in
+practice a watcher that still exists puts its question straight back, within a second of a restart.
+
+The defaults, always asked and needing no registration:
+
+    is a person present
+    is anyone drinking
+    is a hand on the mouse
+    is anyone typing
+    is anyone eating
+    is anyone wearing headphones
+    is the door open
 
 They are lettered on the way in and the answer comes back as letters, which is why a round costs
 about 15 output tokens for seven questions. The letters never leave this process.

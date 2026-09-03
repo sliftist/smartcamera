@@ -11,6 +11,25 @@
  * rewording, and the whole reply is a few tokens regardless of how much is going on in the room.
  */
 
+/**
+ * Asked from a cold start, and after every restart.
+ *
+ * The list is not kept on disk, and that is the point. Anything a caller adds lives only as long as
+ * the process, so a watcher that has gone away takes its question with it. Persisting them meant the
+ * list only ever grew: every experiment anyone ever ran stayed in the prompt forever, and each one
+ * costs prompt and output tokens on every single frame. A client that still cares re-registers on
+ * connect, which it does anyway, and anything in here needs no registering at all.
+ */
+export const DEFAULT_QUESTIONS = [
+    "is a person present",
+    "is anyone drinking",
+    "is a hand on the mouse",
+    "is anyone typing",
+    "is anyone eating",
+    "is anyone wearing headphones",
+    "is the door open",
+];
+
 const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 /** Each question costs prompt and output tokens on every round, so the list has a ceiling. */
 export const MAX_QUESTIONS = 26;
