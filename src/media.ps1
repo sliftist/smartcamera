@@ -1,12 +1,14 @@
 #Requires -Version 5.1
 
 # Pauses or resumes Windows media sessions through SMTC, and reports which sessions it actually changed.
-# Must run under Windows PowerShell 5.1 (powershell.exe) — PowerShell 7 dropped the WinRT type projection.
-
-param(
-    [Parameter(Mandatory = $true)][ValidateSet("status", "pause", "play")][string]$Action,
-    [string]$AppIds = ""
-)
+# Must run under Windows PowerShell 5.1 (powershell.exe) - PowerShell 7 dropped the WinRT type projection.
+#
+# This stays running and reads commands from stdin, one json object per line, answering each with one
+# json line. It used to be spawned per command, and that was where smartpause's lag came from: starting
+# powershell, loading the WindowsRuntime interop assembly, projecting the WinRT types, reflecting over
+# AsTask and handshaking with the session manager is seconds of work, and every one of those seconds
+# sat between the model deciding the headphones were off and the music actually stopping. None of it
+# depends on the command, so all of it is done once, up here, and a pause afterwards is a line of text.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -25,53 +27,77 @@ function Await($operation, $resultType) {
     return $task.Result
 }
 
+# The manager is live: GetSessions re-enumerates every call, so holding one across commands sees apps
+# that opened and closed since. Only the handshake to get it is expensive, and that is what is saved.
 $manager = Await ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager])
 $playing = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionPlaybackStatus]::Playing
 $paused = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionPlaybackStatus]::Paused
 
-$changed = @()
-$skipped = @()
-$sessions = @()
-
-foreach ($session in $manager.GetSessions()) {
-    $sessions += @{ appId = $session.SourceAppUserModelId; status = $session.GetPlaybackInfo().PlaybackStatus.ToString() }
+function Send($payload) {
+    # Written straight to the console and flushed, because the pipeline buffers and a caller waiting on
+    # a line it cannot see is the same as the lag this was written to remove.
+    [Console]::Out.WriteLine((ConvertTo-Json $payload -Compress -Depth 5))
+    [Console]::Out.Flush()
 }
 
-if ($Action -eq "status") {
-    ConvertTo-Json @{ changed = @(); skipped = @(); sessions = @($sessions) } -Compress
-    exit 0
-}
+# Says the setup finished, so a caller knows the expensive part is behind it rather than guessing.
+Send @{ ready = $true }
 
-if ($Action -eq "pause") {
-    foreach ($session in $manager.GetSessions()) {
-        $id = $session.SourceAppUserModelId
-        if ($session.GetPlaybackInfo().PlaybackStatus -ne $playing) {
-            $skipped += $id
-            continue
-        }
-        if (Await ($session.TryPauseAsync()) ([bool])) {
-            $changed += $id
-        }
+while ($null -ne ($line = [Console]::In.ReadLine())) {
+    if (-not $line.Trim()) {
+        continue
     }
-} else {
-    $wanted = @()
-    if ($AppIds) {
-        $wanted = @($AppIds.Split([char]0x0A) | Where-Object { $_ })
-    }
-    foreach ($session in $manager.GetSessions()) {
-        $id = $session.SourceAppUserModelId
-        if ($wanted -notcontains $id) {
-            continue
+    $id = 0
+    try {
+        $request = ConvertFrom-Json $line
+        $id = [int]$request.id
+        $action = [string]$request.action
+        $wanted = @()
+        if ($request.PSObject.Properties.Name -contains "appIds" -and $request.appIds) {
+            $wanted = @($request.appIds)
         }
-        # Anything that is no longer paused was resumed by someone else, so leave it alone.
-        if ($session.GetPlaybackInfo().PlaybackStatus -ne $paused) {
-            $skipped += $id
-            continue
+
+        $changed = @()
+        $skipped = @()
+        $sessions = @()
+        foreach ($session in $manager.GetSessions()) {
+            $sessions += @{ appId = $session.SourceAppUserModelId; status = $session.GetPlaybackInfo().PlaybackStatus.ToString() }
         }
-        if (Await ($session.TryPlayAsync()) ([bool])) {
-            $changed += $id
+
+        if ($action -eq "pause") {
+            foreach ($session in $manager.GetSessions()) {
+                $appId = $session.SourceAppUserModelId
+                if ($session.GetPlaybackInfo().PlaybackStatus -ne $playing) {
+                    $skipped += $appId
+                    continue
+                }
+                if (Await ($session.TryPauseAsync()) ([bool])) {
+                    $changed += $appId
+                }
+            }
+        } elseif ($action -eq "play") {
+            foreach ($session in $manager.GetSessions()) {
+                $appId = $session.SourceAppUserModelId
+                if ($wanted -notcontains $appId) {
+                    continue
+                }
+                # Anything that is no longer paused was resumed by someone else, so leave it alone.
+                if ($session.GetPlaybackInfo().PlaybackStatus -ne $paused) {
+                    $skipped += $appId
+                    continue
+                }
+                if (Await ($session.TryPlayAsync()) ([bool])) {
+                    $changed += $appId
+                }
+            }
+        } elseif ($action -ne "status") {
+            throw "unknown action $action"
         }
+
+        Send @{ id = $id; changed = @($changed); skipped = @($skipped); sessions = @($sessions) }
+    } catch {
+        # Reported rather than thrown, so one bad command does not take the host down and make the
+        # next pause pay the whole startup again.
+        Send @{ id = $id; error = $_.Exception.Message }
     }
 }
-
-ConvertTo-Json @{ changed = @($changed); skipped = @($skipped); sessions = @($sessions) } -Compress

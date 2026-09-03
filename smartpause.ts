@@ -2,7 +2,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { formatDateTime } from "socket-function/src/formatting/format";
-import { pausePlayingMedia, resumeMedia } from "./src/media";
+import { listMediaSessions, pausePlayingMedia, resumeMedia } from "./src/media";
 import { EyeClient } from "./src/eyeClient";
 import { HEADPHONES_PHRASE } from "./src/questions";
 
@@ -67,11 +67,13 @@ class Pauser {
             this.nothingPlayingAtMs = 0;
             return;
         }
+        const startedAtMs = Date.now();
         const result = await resumeMedia(this.paused);
         const skipped = result.skipped.length > 0
             ? `, left ${result.skipped.join(", ")} alone because something else changed it`
             : "";
-        log(`headphones back on, resumed ${result.changed.join(", ") || "nothing"}${skipped}`);
+        log(`headphones back on, resumed ${result.changed.join(", ") || "nothing"}${skipped}`
+            + ` in ${Date.now() - startedAtMs}ms`);
         this.paused = [];
         this.nothingPlayingAtMs = 0;
     }
@@ -80,6 +82,7 @@ class Pauser {
         if (this.nothingPlayingAtMs && Date.now() - this.nothingPlayingAtMs < RETRY_PAUSE_MS) {
             return;
         }
+        const startedAtMs = Date.now();
         const result = await pausePlayingMedia();
         if (result.changed.length === 0) {
             if (!this.nothingPlayingAtMs) {
@@ -90,7 +93,9 @@ class Pauser {
         }
         this.paused = result.changed;
         this.nothingPlayingAtMs = 0;
-        log(`headphones off, paused ${result.changed.join(", ")}`);
+        // Timed because this is where the lag was. The model is about a second behind the room and
+        // cannot be much faster, so anything on top of that shows up here.
+        log(`headphones off, paused ${result.changed.join(", ")} in ${Date.now() - startedAtMs}ms`);
     }
 }
 
@@ -105,6 +110,17 @@ function urlFrom(argv: string[]): string {
 async function main() {
     const url = urlFrom(process.argv.slice(2));
     const password = await readPassword();
+
+    // Started now rather than on the first pause. Standing powershell up is the expensive part, and
+    // paying for it at the moment the headphones come off is exactly the wrong time.
+    const startedAtMs = Date.now();
+    try {
+        const sessions = await listMediaSessions();
+        log(`media host ready in ${Date.now() - startedAtMs}ms, ${sessions.length} session${sessions.length === 1 ? "" : "s"} open`);
+    } catch (error) {
+        // Not fatal. It is retried on the first pause, and saying so beats dying over a warm up.
+        log(`could not start the media host: ${(error as Error).message}`);
+    }
     log(`watching ${JSON.stringify(PHRASE)} at ${url}`);
 
     const pauser = new Pauser();
