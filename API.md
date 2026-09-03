@@ -67,3 +67,52 @@ listed in `unanswered` so a caller can tell the difference between "no" and "did
     GET /frames                     the last 30s of frames held in memory
     GET /frames/<id>                one of them as a jpeg
     POST /annotate {"id","note"}    save a frame plus what the model missed, for training
+
+## A password
+
+Optional. With none set nothing is checked, which is how it starts.
+
+    yarn password              is one set?
+    yarn password hunter2      set or replace it
+    yarn password ""           remove it
+
+It takes effect on the next request, with no restart. Once set, everything needs it: the page, the
+json, the frames and the websocket. Send it as `Authorization: Bearer <password>`, or as a `password`
+query parameter. The query parameter exists because a browser cannot put a header on a websocket
+handshake, so without it the page could not connect at all.
+
+Stored as a salted PBKDF2 hash, not as the password, since the file sits beside a log that anything
+on the network can otherwise read. The page remembers it in localStorage and asks again if it is
+refused.
+
+## The client library
+
+`src/eyeClient.ts` runs unchanged in a browser and under Node. It imports nothing: `WebSocket` and
+`fetch` are globals in both, on Node 22 and any current browser.
+
+    import { EyeClient } from "./src/eyeClient";
+
+    const client = new EyeClient({ url: "http://10.0.0.200:8772", password: "hunter2" });
+
+    const unwatch = client.watch("is anyone drinking", {
+        onStart: entry => console.log("started at", new Date(entry.at)),
+        onStop: entry => console.log("stopped at", new Date(entry.at)),
+    });
+
+    // later
+    unwatch();
+    client.close();
+
+`watch` registers the question with the service if it is not already being asked, so a caller names
+what it cares about and configures nothing. It registers it again after a reconnect, and again if the
+questions change underneath it. That is not belt and braces: the service can be restarted, or its
+questions edited by someone at the page, and a watch whose question had quietly stopped being asked
+would look exactly like a thing that never happens.
+
+Reconnection is automatic, backing off from a second to a minute, because a service that is down is
+usually down for more than a second and a client retrying every second forever is hard to tell from
+something attacking it.
+
+The backlog delivered on connect seeds what is currently true and fires nothing, so a reconnect does
+not replay history as though it were news. `client.current()` returns everything answered yes right
+now. A callback that throws is reported through `onError` and does not stop the feed.

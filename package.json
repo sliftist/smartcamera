@@ -55,7 +55,9 @@
         "daemon:restart": "./scripts/eyed restart",
         "daemon:status": "./scripts/eyed status",
         "daemon:logs": "./scripts/eyed logs",
-        "test:questions": "typenode ./scripts/questions.test.ts"
+        "test:questions": "typenode ./scripts/questions.test.ts",
+        "password": "typenode ./scripts/password.ts",
+        "test:client": "typenode ./scripts/eyeClient.test.ts"
     },
     "dependencies": {
         "jpeg-js": "*",

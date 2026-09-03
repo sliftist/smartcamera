@@ -5,6 +5,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { formatDateTime } from "socket-function/src/formatting/format";
 import { dayStamp, millisecondStamp } from "./src/timestamps";
 import { buildPrompt, parseAnswers, diffAnswers, letterFor, normalizeQuestion, MAX_QUESTIONS, MAX_QUESTION_LENGTH } from "./src/questions";
+import { readPassword, passwordMatches, offeredPassword } from "./src/password";
 
 const EYE2_URL = "http://127.0.0.1:8770";
 const PORT = 8772;
@@ -40,6 +41,8 @@ const TRAINING_DIRECTORY = path.join(__dirname, "training");
 const MAX_NOTE_LENGTH = 500;
 /** The questionnaire. Kept beside the log so it survives a restart. */
 const QUESTIONS_FILE = path.join(LOG_DIRECTORY, "questions.json");
+/** Optional. With no such file nothing is checked; set one with `yarn password`. */
+export const PASSWORD_FILE = path.join(LOG_DIRECTORY, "password.json");
 
 function log(message: string) {
     console.log(`${formatDateTime(Date.now())} | ${message}`);
@@ -436,6 +439,44 @@ tr.fresh { animation: in .35s ease-out; }
 <div id="editor" hidden></div>
 <table><tbody id="rows"></tbody></table>
 <script>
+/**
+ * Remembered so it is typed once per browser rather than once per reload. localStorage is per origin
+ * and never leaves the machine, which for a password on a home network is the right trade.
+ */
+let password = "";
+try { password = localStorage.getItem("eye-password") || ""; } catch (error) { password = ""; }
+
+/** One place the password is attached, and one place a refusal is handled. */
+async function api(path, options) {
+    const settings = Object.assign({}, options || {});
+    settings.headers = Object.assign({}, settings.headers);
+    if (password) {
+        settings.headers.Authorization = "Bearer " + password;
+    }
+    const response = await fetch(path, settings);
+    if (response.status === 401) {
+        askForPassword("that password was not accepted");
+        throw new Error("unauthorised");
+    }
+    return response;
+}
+
+// An img tag cannot carry a header, so a frame is fetched with the password in the query instead.
+function framePath(id) {
+    const base = "/frames/" + encodeURIComponent(id);
+    return password ? base + "?password=" + encodeURIComponent(password) : base;
+}
+
+function askForPassword(why) {
+    const given = window.prompt(why ? why + ". password:" : "password:");
+    if (given === null) {
+        return;
+    }
+    password = given;
+    try { localStorage.setItem("eye-password", password); } catch (error) { /* private window: lasts this session */ }
+    location.reload();
+}
+
 const rows = document.getElementById("rows");
 const vocabulary = document.getElementById("vocabulary");
 const stats = document.getElementById("stats");
@@ -456,7 +497,7 @@ document.getElementById("pin").onsubmit = async event => {
     if (!wanted) {
         return;
     }
-    const response = await fetch("/questions", {
+    const response = await api("/questions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question: wanted }),
@@ -497,7 +538,7 @@ function openEditor(frame, figure) {
     editor.hidden = false;
 
     const image = document.createElement("img");
-    image.src = "/frames/" + encodeURIComponent(frame.id);
+    image.src = framePath(frame.id);
     const side = document.createElement("div");
 
     const when = document.createElement("h2");
@@ -542,7 +583,7 @@ function openEditor(frame, figure) {
         save.disabled = true;
         status.textContent = "saving";
         status.className = "quiet";
-        const response = await fetch("/annotate", {
+        const response = await api("/annotate", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ id: frame.id, note: missing }),
@@ -583,7 +624,7 @@ capture.onclick = async () => {
         capture.textContent = "capture frames";
         return;
     }
-    const frames = await (await fetch("/frames")).json();
+    const frames = await (await api("/frames")).json();
     strip.replaceChildren();
     note.textContent = frames.length ? "click a frame to say what it missed" : "no frames held yet";
     note.className = "quiet";
@@ -592,7 +633,7 @@ capture.onclick = async () => {
     for (const frame of frames.slice().reverse()) {
         const figure = document.createElement("figure");
         const image = document.createElement("img");
-        image.src = "/frames/" + encodeURIComponent(frame.id);
+        image.src = framePath(frame.id);
         image.loading = "lazy";
         const caption = document.createElement("figcaption");
         caption.textContent = time(frame.at) + " · " + frame.reported.length + " reported";
@@ -701,7 +742,7 @@ function setState(state) {
         remove.textContent = "×";
         remove.title = "stop asking " + phrase;
         remove.onclick = async () => {
-            await fetch("/questions?question=" + encodeURIComponent(phrase), { method: "DELETE" });
+            await api("/questions?question=" + encodeURIComponent(phrase), { method: "DELETE" });
             pinNote.textContent = "no longer asking " + phrase;
         };
         pin.append(remove);
@@ -710,7 +751,8 @@ function setState(state) {
 }
 
 function connect() {
-    const socket = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host);
+    const query = password ? "/?password=" + encodeURIComponent(password) : "";
+    const socket = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + query);
     socket.onopen = () => link.classList.remove("down");
     socket.onmessage = event => {
         const message = JSON.parse(event.data);
@@ -726,8 +768,14 @@ function connect() {
         setState(message.state);
     };
     // Reconnecting rather than reloading keeps whatever is already on screen while the link is down.
-    socket.onclose = () => {
+    socket.onclose = event => {
         link.classList.add("down");
+        // 401 comes back as an abnormal close with no useful code, so a socket that will not open
+        // while a password is set is treated as the password being wrong.
+        if (event.code === 1006 && !password) {
+            askForPassword("this needs a password");
+            return;
+        }
         setTimeout(connect, 1000);
     };
     socket.onerror = () => socket.close();
@@ -752,8 +800,17 @@ async function main() {
 
     const recorder = new Recorder(index);
 
+    // Re-read per request, so setting or clearing a password takes effect without a restart.
+    const authorised = (request: http.IncomingMessage, url: URL) =>
+        passwordMatches(readPassword(PASSWORD_FILE), offeredPassword(request.headers.authorization, url));
+
     const server = http.createServer((request, response) => {
         const url = new URL(request.url ?? "/", `http://${HOST}:${PORT}`);
+        if (!authorised(request, url)) {
+            response.writeHead(401, { "Content-Type": "application/json", "WWW-Authenticate": "Bearer" });
+            response.end(JSON.stringify({ error: "A password is required" }));
+            return;
+        }
         if (url.pathname === "/log") {
             const since = Number(url.searchParams.get("since") ?? 0);
             const limit = Number(url.searchParams.get("limit") ?? BACKLOG_LIMIT);
@@ -851,7 +908,15 @@ async function main() {
 
     // One round is a couple of hundred bytes, so pushing them beats a page that reloads itself and
     // rebuilds a few hundred rows to learn that one was added.
-    const sockets = new WebSocketServer({ server });
+    const sockets = new WebSocketServer({
+        server,
+        // Checked at the handshake, so an unauthorised socket is never established rather than being
+        // established and then policed.
+        verifyClient: ({ req }, done) => {
+            const url = new URL(req.url ?? "/", `http://${HOST}:${PORT}`);
+            done(authorised(req, url), 401, "A password is required");
+        },
+    });
     sockets.on("connection", (socket: WebSocket) => {
         socket.send(JSON.stringify({ type: "init", entries: recorder.entriesSince(0, BACKLOG_LIMIT), state: recorder.state }));
         const stop = recorder.listen(entry => {
