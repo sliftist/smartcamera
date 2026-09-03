@@ -10,6 +10,10 @@
  * The risk this trades into is drift. If the model never reports something leaving, it stays in the
  * state forever. So every so often the question goes back to a full description and the state is
  * replaced outright, which is the same bargain a video stream makes with keyframes.
+ *
+ * What this module returns is the scene after the model's reply has been applied, and nothing about
+ * what the model claimed. What changed is worked out by comparing that against the scene before it,
+ * which is a fact rather than a report, and is the only version worth showing anyone.
  */
 
 /** Scene contents carried between rounds. A cap only bounds the prompt; a real scene is far smaller. */
@@ -34,15 +38,26 @@ const REMOVAL = /^(gone|no longer|removed|left)\s*:?\s+/i;
 const LEADING_MARKER = /^(?:[-−–—*\d.)\]]+\s*)+/;
 const NOTHING = /^(nothing|no change|none|unchanged|same|nothing has changed)$/i;
 
-export type SceneRound = {
-    /** The scene after applying this round. */
-    state: string[];
-    added: string[];
-    removed: string[];
-};
+/** Normalized the same way scene items are, so a caller's phrase and a model's answer compare equal. */
+export function normalizePhrase(phrase: string): string {
+    return phrase.replace(LEADING_MARKER, "").replace(/[.,;]+$/, "").trim().toLowerCase();
+}
 
-export function buildPrompt(state: string[], full: boolean): string {
-    if (full || state.length === 0) {
+/**
+ * The list the model is actually shown: the scene, plus every pinned phrase that is not already in it.
+ *
+ * This is the whole mechanism for phrases of interest, and it needs no instruction of its own. A
+ * pinned phrase sits in the list like anything else, so the model answers the question it is already
+ * being asked about everything else: is this still true? If it is not, it says so and the phrase is
+ * simply absent this round. Telling the model about the phrases in prose instead does not work; asked
+ * that way it answered with nothing but the pinned list, having read it as the answer sheet.
+ */
+export function offeredScene(state: string[], interests: string[]): string[] {
+    return [...state, ...interests.filter(interest => !state.includes(interest))];
+}
+
+export function buildPrompt(offered: string[], full: boolean): string {
+    if (full || offered.length === 0) {
         return [
             `Describe this scene as a list of the objects in it and the actions happening.`,
             `Briefly describe each object, and say what each person is doing.`,
@@ -53,7 +68,7 @@ export function buildPrompt(state: string[], full: boolean): string {
     }
     return [
         `A moment ago this scene held:`,
-        ...state.map((item, index) => `${index + 1}. ${item}`),
+        ...offered.map((item, index) => `${index + 1}. ${item}`),
         ``,
         `Look at the image now and report only what has changed.`,
         `Write anything new as a short phrase of at most ${MAX_WORDS} words.`,
@@ -66,9 +81,7 @@ export function buildPrompt(state: string[], full: boolean): string {
 }
 
 /** Lowercase and stripped of list punctuation, so the same phrase twice is one entry. */
-function normalize(item: string): string {
-    return item.replace(LEADING_MARKER, "").replace(/[.,;]+$/, "").trim().toLowerCase();
-}
+const normalize = normalizePhrase;
 
 /**
  * Matched loosely on the way out. The model rarely quotes a removal back word for word, and refusing
@@ -89,11 +102,10 @@ function findInState(item: string, state: string[]): string | undefined {
     return state.find(candidate => candidate.includes(item) || item.includes(candidate));
 }
 
-export function parseRound(reply: string, state: string[], full: boolean): SceneRound {
-    const added: string[] = [];
-    const removed: string[] = [];
+/** The scene as it stands once the model's reply has been applied to what it was shown. */
+export function parseRound(reply: string, offered: string[], full: boolean): string[] {
     // A full description replaces the scene rather than amending it, so nothing carries over.
-    let next = full ? [] : [...state];
+    let next = full ? [] : [...offered];
 
     for (const piece of reply.split("|")) {
         const trimmed = piece.trim();
@@ -108,19 +120,37 @@ export function parseRound(reply: string, state: string[], full: boolean): Scene
             const match = item && findInState(item, next);
             if (match) {
                 next = next.filter(candidate => candidate !== match);
-                removed.push(match);
             }
             continue;
         }
         const item = normalize(trimmed);
         // Already present means the model restated something still true, which the prompt asks it not
-        // to do. Not an error and not news, so it is neither added nor counted as a change.
+        // to do. Not an error and not news, so it changes nothing.
         if (!item || next.includes(item)) {
             continue;
         }
         next.push(item);
-        added.push(item);
     }
 
-    return { state: next.slice(-MAX_STATE), added, removed };
+    return next.slice(-MAX_STATE);
+}
+
+/**
+ * What actually changed, by comparing the two scenes rather than by believing a report.
+ *
+ * The model's own account of what it changed cannot be used for this. Pinned phrases are offered to it
+ * every round, so it announces their removal every round they are not happening, and none of that is
+ * a change in the scene: it is the answer to a question we asked. Diffing the before against the after
+ * gets that right without having to special case it, and stays right whatever the model does.
+ */
+export function diffScenes(before: string[], after: string[]): { added: string[]; removed: string[] } {
+    return {
+        added: after.filter(item => !before.includes(item)),
+        removed: before.filter(item => !after.includes(item)),
+    };
+}
+
+/** Which pinned phrases the scene currently holds, as an exact match on the wording asked for. */
+export function matchInterests(state: string[], interests: string[]): string[] {
+    return interests.filter(interest => state.includes(interest));
 }
