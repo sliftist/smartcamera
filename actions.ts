@@ -269,11 +269,14 @@ pre { margin: 10px 0 0; white-space: pre-wrap; font: 12px/1.5 ui-monospace, mono
 h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; opacity: .55; margin: 0 0 6px; font-weight: 600; }
 button { font: inherit; padding: 5px 12px; border: 1px solid var(--line); border-radius: 6px; background: none; color: inherit; cursor: pointer; }
 button:hover { border-color: #888; }
-#strip { display: flex; gap: 8px; overflow-x: auto; padding: 10px 0; }
-#strip figure { margin: 0; flex: 0 0 auto; cursor: pointer; text-align: center; }
-#strip img { display: block; width: 190px; border-radius: 5px; border: 2px solid transparent; }
+/* A grid that fills the window rather than a row that scrolls sideways. The minimum column is wide
+   enough that a person across the room is actually visible, which is the point of looking at these. */
+#strip { display: grid; grid-template-columns: repeat(auto-fill, minmax(440px, 1fr)); gap: 14px; padding: 12px 0; }
+#strip figure { margin: 0; cursor: pointer; }
+#strip img { display: block; width: 100%; aspect-ratio: 1252 / 704; object-fit: cover; border-radius: 6px; border: 2px solid transparent; background: #8881; }
 #strip figure:hover img { border-color: #d9822b; }
-#strip figcaption { font-size: 11px; opacity: .6; margin-top: 3px; }
+#strip figcaption { font-size: 12px; opacity: .65; margin-top: 5px; }
+@media (max-width: 520px) { #strip { grid-template-columns: 1fr; } }
 .saved { color: #2ba84a; }
 .breakdown { font-size: 11px; opacity: .55; white-space: nowrap; }
 table { border-collapse: collapse; width: 100%; }
