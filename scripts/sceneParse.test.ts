@@ -26,8 +26,27 @@ check("gone by list number removes", parseRound("gone: 2", scene, false),
 check("both at once", parseRound("gone: 3 | drinking from cup", scene, false),
     ["person at desk", "green cup on desk", "drinking from cup"]);
 
-// The failure that emptied the scene every other round: the model mirrors the list format it was
-// shown, and a mirrored list must be a no-op rather than a mass deletion.
+// A position numbers the list the model was shown. That list does not renumber as items come out of
+// it, and resolving against the list being built shifts every index after the first removal.
+console.log(`\npositions number the list the model was shown:`);
+const five = ["one", "two", "three", "four", "five"];
+check("two removals do not shift each other", parseRound("gone: 1|gone: 3", five, false), ["two", "four", "five"]);
+check("three, including the last", parseRound("gone: 2|gone: 4|gone: 5", five, false), ["one", "three"]);
+check("descending order too", parseRound("gone: 5|gone: 1", five, false), ["two", "three", "four"]);
+
+// The exact reply that misfired: nine offered, the model declines 4, 5 and 8. Read against the
+// shrinking list that removed the fourth and then the *sixth*, so the scene lost "hand on mouse",
+// which was on the mouse, and kept "drinking from cup", which was not happening.
+const offeredNine = [
+    "man wearing headphones", "sitting at computer", "screen shows code",
+    "eating food", "drinking from cup", "hand on mouse",
+    "typing on keyboard", "arms crossed", "wearing headphones on head",
+];
+check("the round that broke it", parseRound("gone: 4|gone: 5|gone: 8", offeredNine, false), [
+    "man wearing headphones", "sitting at computer", "screen shows code",
+    "hand on mouse", "typing on keyboard", "wearing headphones on head",
+]);
+
 console.log(`\nechoing the list back changes nothing:`);
 check("dash bulleted echo", parseRound(scene.map(item => `- ${item}`).join(" | "), scene, false), scene);
 check("numbered echo", parseRound(scene.map((item, index) => `${index + 1}. ${item}`).join(" | "), scene, false), scene);
@@ -65,6 +84,7 @@ check("empty scene asks for a description", buildPrompt([], false).startsWith("D
 check("known scene asks for changes", buildPrompt(scene, false).includes("report only what has changed"), true);
 check("the scene is numbered, not dashed", buildPrompt(scene, false).includes("2. green cup on desk"), true);
 check("pinned phrases appear as ordinary list items", buildPrompt(offered, false).includes("4. drinking"), true);
+check("with nothing marking them as different", buildPrompt(offered, false).includes("A moment ago this scene held"), true);
 check("and get no instruction of their own", buildPrompt(offered, false).toLowerCase().includes("exactly"), false);
 
 console.log(failures === 0 ? `\nall passed` : `\n${failures} failed`);

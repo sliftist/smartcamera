@@ -66,6 +66,9 @@ export function buildPrompt(offered: string[], full: boolean): string {
             `Write them on one line separated by | and write nothing else.`,
         ].join("\n");
     }
+    // Pinned phrases sit in this list exactly like anything else, with no marking to say they are
+    // different. That is what makes the model keep the caller's wording: it is being shown the phrase
+    // as something already true of the scene, so confirming it costs nothing and rewording it does.
     return [
         `A moment ago this scene held:`,
         ...offered.map((item, index) => `${index + 1}. ${item}`),
@@ -84,17 +87,10 @@ export function buildPrompt(offered: string[], full: boolean): string {
 const normalize = normalizePhrase;
 
 /**
- * Matched loosely on the way out. The model rarely quotes a removal back word for word, and refusing
- * to drop something because the wording drifted is how a scene fills up with things that left.
- *
- * A bare number is the list position, because a numbered list is an invitation to answer by number
- * and it takes that invitation: "gone: 6" is what it actually says about the sixth item.
+ * Matched loosely. The model rarely quotes a removal back word for word, and refusing to drop
+ * something because the wording drifted is how a scene fills up with things that left.
  */
-function findInState(item: string, state: string[]): string | undefined {
-    const position = /^(\d+)\.?$/.exec(item);
-    if (position) {
-        return state[Number(position[1]) - 1];
-    }
+function findByText(item: string, state: string[]): string | undefined {
     const exact = state.find(candidate => candidate === item);
     if (exact) {
         return exact;
@@ -116,8 +112,14 @@ export function parseRound(reply: string, offered: string[], full: boolean): str
             // Normalizing would eat a bare list number, since a leading digit is one of the bullet
             // shapes stripped off items, so a position is recognised before that runs.
             const target = trimmed.replace(REMOVAL, "").trim();
-            const item = /^\d+\.?$/.test(target) ? target : normalize(target);
-            const match = item && findInState(item, next);
+            const position = /^(\d+)\.?$/.exec(target);
+            // A position numbers the list the model was shown, which does not renumber as items are
+            // dropped from it. Resolving against the list being built instead shifts every index after
+            // the first removal: "gone: 4|gone: 5" took out the fourth and then the sixth item, so the
+            // scene lost things that were there and kept things that were not.
+            const match = position
+                ? offered[Number(position[1]) - 1]
+                : findByText(normalize(target), next);
             if (match) {
                 next = next.filter(candidate => candidate !== match);
             }
