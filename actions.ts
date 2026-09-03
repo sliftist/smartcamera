@@ -4,7 +4,7 @@ import * as path from "path";
 import { WebSocketServer, WebSocket } from "ws";
 import { formatDateTime } from "socket-function/src/formatting/format";
 import { dayStamp, millisecondStamp } from "./src/timestamps";
-import { buildPrompt, parseRound, splitReply, diffScenes, normalizePhrase, FULL_DESCRIBE_EVERY } from "./src/scene";
+import { buildPrompt, parseAnswers, diffAnswers, letterFor, normalizeQuestion, MAX_QUESTIONS, MAX_QUESTION_LENGTH } from "./src/questions";
 
 const EYE2_URL = "http://127.0.0.1:8770";
 const PORT = 8772;
@@ -38,11 +38,8 @@ const FRAME_BUFFER_MS = 30_000;
 const FRAME_PULL_MS = 1000;
 const TRAINING_DIRECTORY = path.join(__dirname, "training");
 const MAX_NOTE_LENGTH = 500;
-/** Phrases callers have pinned. Kept beside the log so they survive a restart. */
-const INTERESTS_FILE = path.join(LOG_DIRECTORY, "interests.json");
-const MAX_PHRASE_LENGTH = 60;
-/** Each one costs prompt tokens on every round, so the list is not allowed to grow without bound. */
-const MAX_INTERESTS = 20;
+/** The questionnaire. Kept beside the log so it survives a restart. */
+const QUESTIONS_FILE = path.join(LOG_DIRECTORY, "questions.json");
 
 function log(message: string) {
     console.log(`${formatDateTime(Date.now())} | ${message}`);
@@ -50,12 +47,13 @@ function log(message: string) {
 
 type Entry = {
     at: number;
-    /** Everything in the scene after this round, pinned phrases included and indistinguishable. */
+    /** The questions answered yes this round. */
     state: string[];
+    /** Questions whose answer flipped since the round before. */
     added: string[];
     removed: string[];
-    /** True when this round asked for a full description instead of a change, which resets the state. */
-    full: boolean;
+    /** Questions the model did not answer at all, which are neither yes nor no. */
+    unanswered: string[];
     /** Exactly what the model said, so a parsing decision can always be second guessed later. */
     raw: string;
     promptTokens: number;
@@ -79,12 +77,9 @@ type BufferedFrame = {
 type Listener = (entry: Entry | undefined) => void;
 
 class Recorder {
-    private scene: string[] = [];
-    private interests: string[] = [];
-    /** What was true last round, so a pinned phrase appearing or leaving reads as a change. */
-    private matched: string[] = [];
-    /** Counts up to a full description, so drift in the carried state gets cleared out periodically. */
-    private sinceFull = 0;
+    private questions: string[] = [];
+    /** What was answered yes last round, so a flip reads as a change. */
+    private yes: string[] = [];
     private recent: Entry[] = [];
     private day = "";
     private stream: fs.WriteStream | undefined;
@@ -94,64 +89,67 @@ class Recorder {
     failures = 0;
     framesMissing = 0;
 
-    constructor(private index: number, private describeEvery: number) {
+    constructor(private index: number) {
         fs.mkdirSync(LOG_DIRECTORY, { recursive: true });
         fs.mkdirSync(TRAINING_DIRECTORY, { recursive: true });
-        this.loadInterests();
+        this.loadQuestions();
         this.loadToday();
     }
 
-    private loadInterests() {
+    private loadQuestions() {
         try {
-            const parsed = JSON.parse(fs.readFileSync(INTERESTS_FILE, "utf8")) as unknown;
+            const parsed = JSON.parse(fs.readFileSync(QUESTIONS_FILE, "utf8")) as unknown;
             if (Array.isArray(parsed)) {
-                this.interests = parsed.filter(item => typeof item === "string").map(normalizePhrase).filter(Boolean);
+                this.questions = parsed
+                    .filter((item): item is string => typeof item === "string")
+                    .map(normalizeQuestion)
+                    .filter(Boolean);
             }
         } catch {
-            // Not written yet, or written badly. Either way there is nothing pinned.
+            // Not written yet, or written badly. Either way there is nothing to ask.
         }
-        if (this.interests.length > 0) {
-            log(`watching for ${this.interests.length} pinned phrase${this.interests.length === 1 ? "" : "s"}`);
-        }
+        log(this.questions.length > 0
+            ? `asking ${this.questions.length} question${this.questions.length === 1 ? "" : "s"} of every frame`
+            : `no questions configured yet, so nothing is being asked`);
     }
 
-    listInterests(): string[] {
-        return [...this.interests];
+    listQuestions(): string[] {
+        return [...this.questions];
     }
 
     /** Returns the list as it now stands, so a caller sees the result of its own call. */
-    addInterest(phrase: string): string[] {
-        const item = normalizePhrase(phrase);
+    addQuestion(question: string): string[] {
+        const item = normalizeQuestion(question);
         if (!item) {
-            throw new Error(`A phrase is required`);
+            throw new Error(`A question is required`);
         }
-        if (item.length > MAX_PHRASE_LENGTH) {
-            throw new Error(`A phrase must be at most ${MAX_PHRASE_LENGTH} characters`);
+        if (item.length > MAX_QUESTION_LENGTH) {
+            throw new Error(`A question must be at most ${MAX_QUESTION_LENGTH} characters`);
         }
-        if (this.interests.includes(item)) {
-            return this.listInterests();
+        if (this.questions.includes(item)) {
+            return this.listQuestions();
         }
-        if (this.interests.length >= MAX_INTERESTS) {
-            throw new Error(`At most ${MAX_INTERESTS} phrases can be pinned at once`);
+        if (this.questions.length >= MAX_QUESTIONS) {
+            throw new Error(`At most ${MAX_QUESTIONS} questions can be asked at once, one per letter`);
         }
-        this.interests.push(item);
-        this.saveInterests();
-        log(`pinned the phrase ${JSON.stringify(item)}`);
-        return this.listInterests();
+        this.questions.push(item);
+        this.saveQuestions();
+        log(`now asking ${JSON.stringify(item)}`);
+        return this.listQuestions();
     }
 
-    removeInterest(phrase: string): string[] {
-        const item = normalizePhrase(phrase);
-        this.interests = this.interests.filter(candidate => candidate !== item);
-        this.saveInterests();
-        log(`unpinned the phrase ${JSON.stringify(item)}`);
-        return this.listInterests();
+    removeQuestion(question: string): string[] {
+        const item = normalizeQuestion(question);
+        this.questions = this.questions.filter(candidate => candidate !== item);
+        // Its last answer goes with it, so re-adding it later starts clean rather than resuming.
+        this.yes = this.yes.filter(candidate => candidate !== item);
+        this.saveQuestions();
+        log(`no longer asking ${JSON.stringify(item)}`);
+        return this.listQuestions();
     }
 
-    private saveInterests() {
-        fs.writeFileSync(INTERESTS_FILE, JSON.stringify(this.interests, undefined, 2));
-        // No re-describe needed. A pinned phrase is offered in the very next round's list, and the
-        // answer to it comes back in that round, so it takes effect about a second after it is added.
+    private saveQuestions() {
+        fs.writeFileSync(QUESTIONS_FILE, JSON.stringify(this.questions, undefined, 2));
         for (const listener of this.listeners) {
             listener(undefined);
         }
@@ -168,16 +166,15 @@ class Recorder {
             try {
                 const entry = JSON.parse(line) as Entry;
                 this.recent.push(entry);
-                // Split back apart on the way in, because the prompt shows only the described half.
-                const state = entry.state ?? [];
-                this.matched = state.filter(item => this.interests.includes(item));
-                this.scene = state.filter(item => !this.interests.includes(item));
+                // Only answers to questions still being asked carry over; the rest were about
+                // questions that have since been removed or reworded.
+                this.yes = (entry.state ?? []).filter(question => this.questions.includes(question));
             } catch {
                 // A half written last line is expected after a hard stop, and is not worth a complaint.
             }
         }
         this.recent = this.recent.slice(-RECENT_LIMIT);
-        log(`recovered ${lines.length} rounds from today, the scene holds ${this.scene.length} things`);
+        log(`recovered ${lines.length} rounds from today, ${this.yes.length} answered yes`);
     }
 
     /**
@@ -249,7 +246,7 @@ class Recorder {
             missing: note,
             reported: entry?.state ?? [],
             raw: entry?.raw ?? "",
-            prompt: buildPrompt(this.scene, this.interests, false),
+            prompt: buildPrompt(this.questions),
         }, undefined, 2));
         log(`annotated ${stem}: ${JSON.stringify(note)}`);
         return { saved: `${stem}.jpg` };
@@ -279,10 +276,10 @@ class Recorder {
 
     /** False when the round produced nothing, which is the caller's cue to back off rather than spin. */
     async round(): Promise<boolean> {
-        // A full description when the scene is unknown, and again every so often to clear out anything
-        // the model stopped mentioning without ever saying it had gone.
-        const full = this.scene.length === 0 || this.sinceFull >= this.describeEvery;
-        const prompt = buildPrompt(this.scene, this.interests, full);
+        if (this.questions.length === 0) {
+            return false;
+        }
+        const prompt = buildPrompt(this.questions);
         const at = Date.now();
         let reply: Record<string, unknown>;
         try {
@@ -305,21 +302,20 @@ class Recorder {
         }
 
         const raw = String(reply.answer ?? "");
-        // The letters are asked for separately only because the model answers that question better.
-        // They are expanded here and folded straight into the scene, so what comes out the other side
-        // reads as if the model had said the phrase itself. Nothing downstream knows a phrase was
-        // pinned, or should have to: it is one scene, and these are things in it.
-        const { changes, matched } = splitReply(raw, this.interests);
-        const described = parseRound(changes, this.scene, full)
-            .filter(item => !this.interests.includes(item));
-        const state = [...described, ...matched];
-        const { added, removed } = diffScenes([...this.scene, ...this.matched], state);
+        const { yes, answered } = parseAnswers(raw, this.questions);
+        // Compared only against the questions this round actually answered. One the model skipped is
+        // not a no, and treating it as one would report something leaving that nobody said had left.
+        const before = this.yes.filter(question => answered.includes(question));
+        const { added, removed } = diffAnswers(before, yes);
+        const unanswered = this.questions.filter(question => !answered.includes(question));
         const entry: Entry = {
             at,
-            state,
+            // A skipped question keeps its last answer rather than flapping to no and back.
+            state: this.questions.filter(question =>
+                yes.includes(question) || (unanswered.includes(question) && this.yes.includes(question))),
             added,
             removed,
-            full,
+            unanswered,
             raw,
             promptTokens: Number(reply.promptTokens ?? 0),
             outputTokens: Number(reply.outputTokens ?? 0),
@@ -328,18 +324,16 @@ class Recorder {
             generateMs: Number(reply.generateMs ?? 0),
             analyzeMs: Number(reply.analyzeMs ?? 0),
         };
-        // The prompt shows only what the model described. The pinned phrases go in as the lettered
-        // question instead, so they are held apart here and merged again on the way out.
-        this.scene = described;
-        this.matched = matched;
-        this.sinceFull = full ? 0 : this.sinceFull + 1;
+        this.yes = entry.state;
         this.append(entry);
         this.rounds++;
 
-        // Only the change is logged. A still scene is one line saying so, which is the whole point.
+        // Only the flips are logged. A round where nothing changed is one line saying so.
         const change = [...added.map(item => `+ ${item}`), ...removed.map(item => `- ${item}`)];
         log(`${entry.outputTokens} out tok, ${entry.analyzeMs.toFixed(0)}ms`
-            + `${full ? " | DESCRIBED" : ""} | ${change.join(" | ") || "no change"}`);
+            + ` | ${change.join(" | ") || "no change"}`
+            + ` | ${entry.state.length}/${this.questions.length} yes`
+            + `${unanswered.length > 0 ? `, ${unanswered.length} unanswered` : ""}`);
         return true;
     }
 
@@ -349,12 +343,11 @@ class Recorder {
             failures: this.failures,
             buffered: this.recentFrames().length,
             bufferSeconds: FRAME_BUFFER_MS / 1000,
-            /** The whole scene, exactly as an entry reports it: no pinned phrase is distinguishable. */
-            scene: [...this.scene, ...this.matched],
-            interests: this.listInterests(),
-            roundsUntilDescribe: Math.max(0, this.describeEvery - this.sinceFull),
+            /** The questions and which of them are currently answered yes. */
+            questions: this.listQuestions(),
+            yes: [...this.yes],
             // Sent so the wording can be reviewed against the answers it is producing, live.
-            prompt: buildPrompt(this.scene, this.interests, false),
+            prompt: buildPrompt(this.questions),
         };
     }
 
@@ -431,10 +424,11 @@ tr.fresh { animation: in .35s ease-out; }
 <h1>eye actions</h1>
 <div class="meta"><span id="link"></span><span id="stats">connecting</span></div>
 <details><summary>the prompt being sent right now</summary><pre id="prompt"></pre></details>
-<h2>phrases of interest</h2>
-<div class="pins"><span id="interests"></span><form id="pin"><input id="phrase" placeholder="e.g. drinking" maxlength="60" autocomplete="off"><button type="submit">pin</button></form></div>
+<h2>questions asked of every frame</h2>
+<div class="pins"><span id="interests"></span></div>
+<form id="pin"><input id="phrase" placeholder="e.g. is a hand on the mouse" maxlength="120" autocomplete="off"><button type="submit">add</button></form>
 <div id="pinNote" class="quiet"></div>
-<h2>the scene right now</h2>
+<h2>answered yes right now</h2>
 <ul id="vocabulary"></ul>
 <h2>frames <span id="buffered" class="quiet"></span></h2>
 <div><button id="capture">capture frames</button> <span id="note" class="quiet"></span></div>
@@ -462,10 +456,10 @@ document.getElementById("pin").onsubmit = async event => {
     if (!wanted) {
         return;
     }
-    const response = await fetch("/interests", {
+    const response = await fetch("/questions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phrase: wanted }),
+        body: JSON.stringify({ question: wanted }),
     });
     const reply = await response.json();
     if (reply.error) {
@@ -473,7 +467,7 @@ document.getElementById("pin").onsubmit = async event => {
         return;
     }
     phrase.value = "";
-    pinNote.textContent = "pinned. the scene is re-described on the next round so it uses the new wording.";
+    pinNote.textContent = "added. it is asked of the next frame, about a second from now.";
 };
 
 const capture = document.getElementById("capture");
@@ -685,19 +679,19 @@ function setState(state) {
     buffered.textContent = state.buffered + " frames held, last " + state.bufferSeconds + "s";
     prompt.textContent = state.prompt;
     vocabulary.replaceChildren();
-    for (const action of state.scene) {
+    for (const action of state.yes) {
         const li = document.createElement("li");
         li.textContent = action;
         vocabulary.append(li);
     }
     interests.replaceChildren();
-    if (state.interests.length === 0) {
+    if (state.questions.length === 0) {
         const none = document.createElement("span");
         none.className = "quiet";
-        none.textContent = "none pinned";
+        none.textContent = "no questions yet, nothing is being asked";
         interests.append(none);
     }
-    for (const phrase of state.interests) {
+    for (const phrase of state.questions) {
         const pin = document.createElement("span");
         // Green while the scene actually holds it, which is the same condition an api caller sees.
         pin.className = "pin";
@@ -705,10 +699,10 @@ function setState(state) {
         const remove = document.createElement("button");
         remove.type = "button";
         remove.textContent = "×";
-        remove.title = "unpin " + phrase;
+        remove.title = "stop asking " + phrase;
         remove.onclick = async () => {
-            await fetch("/interests?phrase=" + encodeURIComponent(phrase), { method: "DELETE" });
-            pinNote.textContent = "unpinned " + phrase;
+            await fetch("/questions?question=" + encodeURIComponent(phrase), { method: "DELETE" });
+            pinNote.textContent = "no longer asking " + phrase;
         };
         pin.append(remove);
         interests.append(pin);
@@ -745,21 +739,18 @@ async function main() {
     const args = process.argv.slice(2);
     let intervalSeconds = DEFAULT_INTERVAL_SECONDS;
     let index = DEFAULT_INDEX;
-    let describeEvery = FULL_DESCRIBE_EVERY;
     for (let position = 0; position < args.length; position++) {
         if (args[position] === "--every") {
             intervalSeconds = Number(args[++position]);
         } else if (args[position] === "--index") {
             index = Number(args[++position]);
-        } else if (args[position] === "--describe-every") {
-            describeEvery = Number(args[++position]);
         } else {
-            console.error(`Unknown argument ${args[position]}; known are --every, --index, --describe-every`);
+            console.error(`Unknown argument ${args[position]}; known are --every and --index`);
             process.exit(1);
         }
     }
 
-    const recorder = new Recorder(index, describeEvery);
+    const recorder = new Recorder(index);
 
     const server = http.createServer((request, response) => {
         const url = new URL(request.url ?? "/", `http://${HOST}:${PORT}`);
@@ -775,39 +766,39 @@ async function main() {
             response.end(JSON.stringify(recorder.state));
             return;
         }
-        if (url.pathname === "/interests") {
+        if (url.pathname === "/questions") {
             const send = (status: number, payload: Record<string, unknown>) => {
                 response.writeHead(status, { "Content-Type": "application/json" });
                 response.end(JSON.stringify(payload));
             };
             if (request.method === "GET") {
-                send(200, { interests: recorder.listInterests() });
+                send(200, { questions: recorder.listQuestions() });
                 return;
             }
             if (request.method === "DELETE") {
                 // In the query rather than the body, so it can be removed with a plain curl -X DELETE.
-                send(200, { interests: recorder.removeInterest(url.searchParams.get("phrase") ?? "") });
+                send(200, { questions: recorder.removeQuestion(url.searchParams.get("question") ?? "") });
                 return;
             }
             if (request.method === "POST") {
                 let body = "";
                 request.on("data", chunk => {
                     body += chunk;
-                    if (body.length > MAX_PHRASE_LENGTH * 8) {
+                    if (body.length > MAX_QUESTION_LENGTH * 8) {
                         request.destroy();
                     }
                 });
                 request.on("end", () => {
                     try {
-                        const parsed = JSON.parse(body) as { phrase?: unknown };
-                        send(200, { interests: recorder.addInterest(String(parsed.phrase ?? "")) });
+                        const parsed = JSON.parse(body) as { question?: unknown };
+                        send(200, { questions: recorder.addQuestion(String(parsed.question ?? "")) });
                     } catch (error) {
                         send(400, { error: (error as Error).message });
                     }
                 });
                 return;
             }
-            send(405, { error: `Use GET, POST or DELETE on /interests` });
+            send(405, { error: `Use GET, POST or DELETE on /questions` });
             return;
         }
         if (url.pathname === "/frames") {
@@ -867,7 +858,7 @@ async function main() {
             if (socket.readyState !== socket.OPEN) {
                 return;
             }
-            // No entry means the pinned phrases changed rather than a round landing, so subscribers
+            // No entry means the questions changed rather than a round landing, so subscribers
             // get the new state without a fabricated round to go with it.
             socket.send(entry
                 ? JSON.stringify({ type: "entry", entry, state: recorder.state })
@@ -896,7 +887,7 @@ async function main() {
         }
     })();
 
-    log(`asking camera ${index} ${intervalSeconds > 0 ? `every ${intervalSeconds}s` : `back to back`}, re-describing the whole scene every ${describeEvery} rounds`);
+    log(`asking camera ${index} ${intervalSeconds > 0 ? `every ${intervalSeconds}s` : `back to back`}`);
     while (true) {
         const startedAtMs = Date.now();
         const answered = await recorder.round();

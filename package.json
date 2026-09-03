@@ -46,7 +46,6 @@
         "smartpause": "typenode ./smartpause.ts 2",
         "autopause": "typenode ./autopause.ts %USERPROFILE%/Desktop/view2.bat",
         "bench:quant": "typenode ./scripts/benchQuant.ts",
-        "test:scene": "typenode ./scripts/sceneParse.test.ts",
         "watch": "typenode ./scripts/watch.ts",
         "actions": "typenode ./actions.ts",
         "daemon": "./scripts/eyed",
@@ -55,7 +54,8 @@
         "daemon:stop": "./scripts/eyed stop",
         "daemon:restart": "./scripts/eyed restart",
         "daemon:status": "./scripts/eyed status",
-        "daemon:logs": "./scripts/eyed logs"
+        "daemon:logs": "./scripts/eyed logs",
+        "test:questions": "typenode ./scripts/questions.test.ts"
     },
     "dependencies": {
         "jpeg-js": "*",
