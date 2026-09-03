@@ -46,7 +46,8 @@
         "smartpause": "typenode ./smartpause.ts 2",
         "autopause": "typenode ./autopause.ts %USERPROFILE%/Desktop/view2.bat",
         "bench:quant": "typenode ./scripts/benchQuant.ts",
-        "watch": "typenode ./scripts/watch.ts"
+        "watch": "typenode ./scripts/watch.ts",
+        "actions": "typenode ./actions.ts"
     },
     "dependencies": {
         "jpeg-js": "*",
