@@ -581,9 +581,14 @@ async function main() {
 
     const { backend: client, name: backendName } = createAskBackend(__dirname, message => log(message));
     console.log(`[eye2] starting Qwen3-VL on the ${backendName} backend, this takes a moment while the weights load`);
-    const imageTokens = await client.start();
+    // Deliberately not awaited. A model that will not start is a reason to answer questions with an
+    // error, not a reason for this process to die: the camera half works without it, /frame and
+    // /status keep serving, and the backend retries on its own. Waiting here made one bad model flag
+    // into a crash loop that took the whole service down 82 times before anyone looked.
+    void client.start()
+        .then(imageTokens => console.log(`[eye2] model ready, ${imageTokens} image tokens per frame`))
+        .catch(error => log(`the model did not come up: ${(error as Error).message}; it will keep trying`));
     await initializeDecoder();
-    console.log(`[eye2] ready, ${imageTokens} image tokens per frame`);
     console.log(instant
         ? `[eye2] instant: every frame is decoded while anything is asking, idling on keyframes otherwise`
         : `[eye2] keyframes only, pass "instant" to decode every frame while anything is asking`);
