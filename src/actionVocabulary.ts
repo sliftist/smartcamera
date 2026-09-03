@@ -14,8 +14,10 @@
 export const DEFAULT_VOCABULARY_SIZE = 10;
 const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const MAX_ACTION_WORDS = 6;
-const MIN_ACTIONS = 3;
-const MAX_ACTIONS = 6;
+const MIN_ACTIONS = 1;
+const MAX_ACTIONS = 3;
+const MIN_OBJECTS = 3;
+const MAX_OBJECTS = 6;
 /** A letter on its own, tolerating the punctuation a model tends to add back. */
 const LETTER_PATTERN = /^([A-Z])[).:\]]?$/;
 /** Leading list punctuation on a spelled out action, same tolerance. */
@@ -34,23 +36,25 @@ export function letterFor(index: number): string {
 
 /**
  * Asked plainly, the model answers a busy scene with one summarising phrase, which throws away most
- * of what is in the frame. Naming the aspects to cover and a count is what makes it enumerate instead
- * of summarise: the same frame goes from "person coding on computer" to six separate observations.
+ * of what is in the frame. Asking for counts is what makes it enumerate instead of summarise. Objects
+ * are asked for alongside actions because a scene that is not doing much still has things in it, and
+ * an object appearing is often the first sign of an action about to happen.
+ *
+ * Objects share the vocabulary with actions rather than getting their own. Both are just phrases that
+ * mostly repeat frame to frame, which is the only property the letter scheme needs.
  */
 export function buildPrompt(known: string[]): string {
     const lines = [
-        `List each separate thing happening in this image right now.`,
-        `Cover the person's posture, what their hands are doing, what they are looking at,`,
-        `and anything else going on. Only list what you can actually see.`,
-        `Give between ${MIN_ACTIONS} and ${MAX_ACTIONS} actions.`,
+        `List all actions in the scene, and the most important objects.`,
+        `Between ${MIN_ACTIONS}-${MAX_ACTIONS} actions, and ${MIN_OBJECTS}-${MAX_OBJECTS} objects.`,
     ];
     if (known.length > 0) {
-        lines.push(``, `These actions already have a letter:`);
+        lines.push(``, `These already have a letter:`);
         known.forEach((action, index) => lines.push(`${letterFor(index)}) ${action}`));
-        lines.push(``, `If an action is one of those, write only its letter.`);
+        lines.push(``, `If something is one of those, write only its letter.`);
         lines.push(`If it is not, write it as a short phrase of at most ${MAX_ACTION_WORDS} words.`);
     } else {
-        lines.push(``, `Write each action as a short phrase of at most ${MAX_ACTION_WORDS} words.`);
+        lines.push(``, `Write each one as a short phrase of at most ${MAX_ACTION_WORDS} words.`);
     }
     // Last, because the format is the instruction most often dropped when it is buried mid prompt.
     lines.push(``, `Write everything on one line separated by | and write nothing else.`);

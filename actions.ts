@@ -29,6 +29,11 @@ const REQUEST_TIMEOUT_MS = 60_000;
  * missed, which is the only frame worth saving.
  */
 const FRAME_BUFFER_MS = 30_000;
+/**
+ * Frames are pulled on their own clock rather than one per answer. Tying them to rounds gave a frame
+ * only every 1.4s and, worse, tied what is kept to what the model happened to be asked about.
+ */
+const FRAME_PULL_MS = 1000;
 const TRAINING_DIRECTORY = path.join(__dirname, "training");
 const MAX_NOTE_LENGTH = 500;
 
@@ -98,16 +103,29 @@ class Recorder {
         log(`recovered ${lines.length} rounds from today, vocabulary is ${this.vocabulary.length} deep`);
     }
 
-    /** Held only as bytes in memory, and only until they age out. */
-    private bufferFrame(frameFile: string, at: number) {
+    /**
+     * Held only as bytes in memory, and only until they age out.
+     *
+     * Asked of eye2 directly rather than read off the debug jpegs it leaves on disk. Those are named
+     * by a number that cycles, and eye2 writes one only after it has finished answering, so reading
+     * the path it just handed back returns whatever was at that number a hundred rounds ago. That is
+     * where the duplicates came from: not the same frame twice, but a previous lap's frames served
+     * back in order.
+     */
+    async pullFrame() {
+        const at = Date.now();
         try {
-            const jpeg = fs.readFileSync(frameFile);
+            const response = await fetch(`${EYE2_URL}/frame?index=${this.index}`, {
+                signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+            });
+            if (!response.ok) {
+                throw new Error(`eye2 returned ${response.status}`);
+            }
+            const jpeg = Buffer.from(await response.arrayBuffer());
             if (jpeg.length > 0) {
                 this.frames.push({ id: String(at), at, jpeg });
             }
-        } catch {
-            // eye2 writes the frame after it answers, so occasionally it is not there yet. The next
-            // round will have one, and a missing frame is not worth failing a round over.
+        } catch (error) {
             this.framesMissing++;
         }
         const cutoff = Date.now() - FRAME_BUFFER_MS;
@@ -207,9 +225,6 @@ class Recorder {
             generateMs: Number(reply.generateMs ?? 0),
             analyzeMs: Number(reply.analyzeMs ?? 0),
         };
-        if (typeof reply.frameFile === "string") {
-            this.bufferFrame(reply.frameFile, at);
-        }
         this.vocabulary = remember(this.vocabulary, actions, this.vocabularySize);
         this.append(entry);
         this.rounds++;
@@ -513,6 +528,18 @@ async function main() {
         log(`  /log     json, ?since=<ms epoch>&limit=<n>`);
         log(`  /status  rounds and the current vocabulary`);
     });
+
+    // Its own loop, so how often frames are kept does not depend on how long an answer takes.
+    void (async () => {
+        while (true) {
+            const startedAtMs = Date.now();
+            await recorder.pullFrame();
+            const remainingMs = FRAME_PULL_MS - (Date.now() - startedAtMs);
+            if (remainingMs > 0) {
+                await new Promise(resolve => setTimeout(resolve, remainingMs));
+            }
+        }
+    })();
 
     log(`asking camera ${index} ${intervalSeconds > 0 ? `every ${intervalSeconds}s` : `back to back`}, keeping ${vocabularySize} lettered actions`);
     while (true) {

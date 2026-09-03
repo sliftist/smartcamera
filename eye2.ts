@@ -9,7 +9,7 @@ import { RtspClient } from "./src/rtsp";
 import { AccessUnit, H264Depacketizer, isKeyframe, nalType, parseParameterSets, parseSps, toAnnexB, NAL_TYPE_PPS, NAL_TYPE_SPS } from "./src/h264";
 import { decodeKeyframe, initializeDecoder, DecodedFrame } from "./src/decoder";
 import { StreamDecoder } from "./src/streamDecoder";
-import { rotate180 } from "./src/overlay";
+import { resizeToFit, rotate180 } from "./src/overlay";
 import { AskBackend, createAskBackend } from "./src/askBackend";
 import { loadViews, View } from "./src/views";
 
@@ -34,6 +34,13 @@ const FRAME_DIRECTORY = path.join(__dirname, "frames");
 const KNOWN_FLAGS = new Set(["instant", "debug"]);
 const INDEX_PATTERN = /^\d+$/;
 const MAX_PROMPT_LENGTH = 2000;
+/**
+ * What /frame hands out. Matching what the model is actually shown means a caller keeping frames for
+ * review is looking at the same pixels the answer came from, and a full size jpeg costs about twice
+ * as long to encode for detail that was never in front of the model.
+ */
+const SERVED_FRAME_WIDTH = 1280;
+const SERVED_FRAME_HEIGHT = 704;
 const LOCAL_ADDRESSES = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
 function log(message: string) {
@@ -455,6 +462,25 @@ class Server {
         }
     }
 
+    /**
+     * The freshest frame, as a jpeg. Demand is held across the wait so instant mode keeps decoding
+     * for a caller that only wants pictures, which is what stops this from returning the same frame
+     * over and over once the decoder has idled out.
+     */
+    async frame(index: number): Promise<Buffer> {
+        const watcher = this.watchers[index];
+        watcher.addDemand();
+        try {
+            const timeout = new Promise<never>((_, fail) =>
+                setTimeout(() => fail(new Error(`No frame from ${this.views[index].name} within ${KEYFRAME_TIMEOUT_MS / 1000}s`)), KEYFRAME_TIMEOUT_MS));
+            const captured = await Promise.race([watcher.nextImage(), timeout]);
+            const scaled = resizeToFit(captured.image, SERVED_FRAME_WIDTH, SERVED_FRAME_HEIGHT);
+            return encodeJpeg(scaled.rgb, scaled.width, scaled.height);
+        } finally {
+            watcher.removeDemand();
+        }
+    }
+
     status(): Record<string, unknown> {
         return {
             views: this.views.map(view => ({
@@ -572,6 +598,17 @@ async function main() {
                     send(200, server.status());
                     return;
                 }
+                if (url.pathname === "/frame") {
+                    const rawFrameIndex = url.searchParams.get("index") ?? "0";
+                    if (!INDEX_PATTERN.test(rawFrameIndex) || Number(rawFrameIndex) >= views.length) {
+                        send(400, { error: `index must be a whole number below ${views.length}` });
+                        return;
+                    }
+                    const jpeg = await server.frame(Number(rawFrameIndex));
+                    response.writeHead(200, { "Content-Type": "image/jpeg", "Content-Length": jpeg.length });
+                    response.end(jpeg);
+                    return;
+                }
                 const parameters = await readParameters(request, url);
                 const rawIndex = String(parameters.index ?? "");
                 // A number and only a number: the index picks a camera, it never names a file.
@@ -605,6 +642,7 @@ async function main() {
         console.log(`[eye2]   GET /?index=0&prompt=is%20a%20person%20in%20the%20image`);
         console.log(`[eye2]   POST / {"index":0,"prompt":"..."}`);
         console.log(`[eye2]   GET /status`);
+        console.log(`[eye2]   GET /frame?index=0  the freshest frame as a jpeg`);
     });
 }
 
