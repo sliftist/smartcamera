@@ -67,9 +67,16 @@ export function passwordMatches(stored: Stored | undefined, offered: string): bo
  */
 export function offeredPassword(headerValue: string | undefined, url: URL): string {
     const header = headerValue ?? "";
-    const bearer = /^Bearer\s+(.*)$/i.exec(header);
+    // Exactly one space is the separator and everything after it is the password, verbatim. Anything
+    // looser eats a leading space that belongs to the password, and trimming ate a trailing one, so
+    // the same password worked as a query parameter and failed as a header.
+    //
+    // A trailing space still cannot survive a header, because HTTP lets any hop strip the optional
+    // whitespace around a field value and Node already has. The query parameter has no such rule and
+    // carries a password exactly as written, which is the one to use for anything unusual.
+    const bearer = /^Bearer (.*)$/i.exec(header);
     if (bearer) {
-        return bearer[1].trim();
+        return bearer[1];
     }
     return url.searchParams.get("password") ?? "";
 }

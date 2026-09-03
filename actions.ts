@@ -5,7 +5,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { formatDateTime } from "socket-function/src/formatting/format";
 import { dayStamp, millisecondStamp } from "./src/timestamps";
 import { buildPrompt, parseAnswers, diffAnswers, letterFor, normalizeQuestion, MAX_QUESTIONS, MAX_QUESTION_LENGTH } from "./src/questions";
-import { readPassword, passwordMatches, offeredPassword } from "./src/password";
+import { readPassword, writePassword, passwordMatches, offeredPassword } from "./src/password";
 
 const EYE2_URL = "http://127.0.0.1:8770";
 const PORT = 8772;
@@ -413,7 +413,10 @@ td { border-top: 1px solid var(--line); padding: 7px 6px; vertical-align: top; }
        padding: 2px 4px 2px 11px; margin-right: 6px; }
               font-size: 15px; line-height: 1; border-radius: 999px; }
 .pin button:hover { opacity: 1; }
-#pin { display: inline-flex; gap: 6px; }
+#pin, #secret { display: inline-flex; gap: 6px; margin-bottom: 6px; }
+#secret input { font: inherit; padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px;
+                background: none; color: inherit; min-width: 200px; }
+#secretNote { margin-bottom: 16px; min-height: 1.2em; }
 #pin input { font: inherit; padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px;
              background: none; color: inherit; min-width: 170px; }
 #pinNote { margin-bottom: 16px; min-height: 1.2em; }
@@ -427,6 +430,9 @@ tr.fresh { animation: in .35s ease-out; }
 <h1>eye actions</h1>
 <div class="meta"><span id="link"></span><span id="stats">connecting</span></div>
 <details><summary>the prompt being sent right now</summary><pre id="prompt"></pre></details>
+<h2>password</h2>
+<form id="secret"><input id="secretValue" type="password" placeholder="leave empty to remove" autocomplete="new-password"><button type="submit">set</button></form>
+<div id="secretNote" class="quiet"></div>
 <h2>questions asked of every frame</h2>
 <div class="pins"><span id="interests"></span></div>
 <form id="pin"><input id="phrase" placeholder="e.g. is a hand on the mouse" maxlength="120" autocomplete="off"><button type="submit">add</button></form>
@@ -475,6 +481,42 @@ function askForPassword(why) {
     password = given;
     try { localStorage.setItem("eye-password", password); } catch (error) { /* private window: lasts this session */ }
     location.reload();
+}
+
+// Reaching the page at all means the current password was accepted, or that there is none, so
+// setting one from here needs no further proof. Empty removes it.
+document.getElementById("secret").onsubmit = async event => {
+    event.preventDefault();
+    const field = document.getElementById("secretValue");
+    const wanted = field.value;
+    const note = document.getElementById("secretNote");
+    const response = await api("/password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: wanted }),
+    });
+    const reply = await response.json();
+    if (reply.error) {
+        note.textContent = reply.error;
+        return;
+    }
+    // Remembered immediately, or the next request from this page would be refused by the new one.
+    password = wanted;
+    try { localStorage.setItem("eye-password", password); } catch (error) { /* private window */ }
+    field.value = "";
+    note.textContent = reply.set ? "password set, and remembered in this browser" : "password removed";
+    note.className = "saved";
+};
+
+async function showPasswordState() {
+    try {
+        const reply = await (await api("/password")).json();
+        document.getElementById("secretNote").textContent = reply.set
+            ? "a password is set; everything needs it, including the websocket"
+            : "no password set, so anything on this network can read and change all of this";
+    } catch (error) {
+        // Unauthorised, which askForPassword has already handled.
+    }
 }
 
 const rows = document.getElementById("rows");
@@ -780,6 +822,7 @@ function connect() {
     };
     socket.onerror = () => socket.close();
 }
+showPasswordState();
 connect();
 </script>`;
 
@@ -821,6 +864,41 @@ async function main() {
         if (url.pathname === "/status") {
             response.writeHead(200, { "Content-Type": "application/json" });
             response.end(JSON.stringify(recorder.state));
+            return;
+        }
+        if (url.pathname === "/password") {
+            const send = (status: number, payload: Record<string, unknown>) => {
+                response.writeHead(status, { "Content-Type": "application/json" });
+                response.end(JSON.stringify(payload));
+            };
+            // Only ever says whether one is set. Reaching here at all means the current one was
+            // accepted, or that there is none, so no further check is needed to change it.
+            if (request.method === "GET") {
+                send(200, { set: readPassword(PASSWORD_FILE) !== undefined });
+                return;
+            }
+            if (request.method === "POST") {
+                let body = "";
+                request.on("data", chunk => {
+                    body += chunk;
+                    if (body.length > 4096) {
+                        request.destroy();
+                    }
+                });
+                request.on("end", () => {
+                    try {
+                        const parsed = JSON.parse(body) as { password?: unknown };
+                        const wanted = String(parsed.password ?? "");
+                        writePassword(PASSWORD_FILE, wanted);
+                        log(wanted ? `the password was changed` : `the password was removed`);
+                        send(200, { set: wanted.length > 0 });
+                    } catch (error) {
+                        send(400, { error: (error as Error).message });
+                    }
+                });
+                return;
+            }
+            send(405, { error: `Use GET or POST on /password` });
             return;
         }
         if (url.pathname === "/questions") {

@@ -76,10 +76,24 @@ Optional. With none set nothing is checked, which is how it starts.
     yarn password hunter2      set or replace it
     yarn password ""           remove it
 
+Or from the page, which has a field for it, or over http:
+
+    GET  /password                        -> { set }
+    POST /password {"password":"hunter2"}  -> { set }
+    POST /password {"password":""}         -> removes it
+
+Changing it needs no separate proof: reaching the endpoint at all means the current one was accepted,
+or that there is none. The page remembers the new one immediately, since its next request would
+otherwise be refused by the password it just set.
+
 It takes effect on the next request, with no restart. Once set, everything needs it: the page, the
 json, the frames and the websocket. Send it as `Authorization: Bearer <password>`, or as a `password`
 query parameter. The query parameter exists because a browser cannot put a header on a websocket
 handshake, so without it the page could not connect at all.
+
+The password is taken exactly as written, with one space after `Bearer` as the separator and nothing
+trimmed. A trailing space still cannot survive a header, because HTTP lets any hop strip the optional
+whitespace around a field value; the query parameter has no such rule and carries anything.
 
 Stored as a salted PBKDF2 hash, not as the password, since the file sits beside a log that anything
 on the network can otherwise read. The page remembers it in localStorage and asks again if it is
