@@ -817,8 +817,11 @@ function duration(ms) {
 }
 
 /**
- * Read once on load. The files are small, being changes and a heartbeat, so this is a fetch and a
- * walk rather than anything that needs its own storage.
+ * Read once on load, for today only.
+ *
+ * A day file is small on its own, being changes and a heartbeat, but a week of them is tens of
+ * thousands of lines to read off disk, replay and send, on every single page load. What the page
+ * shows is what the room has been doing, and that question is about today.
  */
 async function showHistory() {
     const table = document.getElementById("historyTable");
@@ -826,7 +829,10 @@ async function showHistory() {
     const span = document.getElementById("statsSpan");
     let summary;
     try {
-        summary = await (await api("/stats?days=7")).json();
+        // Today only. A week is tens of thousands of lines to read, replay and send on every page
+        // load, and the answer it gives is mostly about days you are no longer looking at. An api
+        // caller can still ask for more with ?days=.
+        summary = await (await api("/stats?days=1")).json();
     } catch (error) {
         return;
     }
