@@ -50,3 +50,4 @@ cloudflare.json
 data
 __pycache__/
 *.pyc
+bench-frames

@@ -44,7 +44,8 @@
         "ask2:concurrent": "typenode ./scripts/eye2Concurrent.ts",
         "ask2:security": "typenode ./scripts/eye2Security.ts",
         "smartpause": "typenode ./smartpause.ts 2",
-        "autopause": "typenode ./autopause.ts %USERPROFILE%/Desktop/view2.bat"
+        "autopause": "typenode ./autopause.ts %USERPROFILE%/Desktop/view2.bat",
+        "bench:quant": "typenode ./scripts/benchQuant.ts"
     },
     "dependencies": {
         "jpeg-js": "*",

@@ -10,7 +10,7 @@ import { AccessUnit, H264Depacketizer, isKeyframe, nalType, parseParameterSets, 
 import { decodeKeyframe, initializeDecoder, DecodedFrame } from "./src/decoder";
 import { StreamDecoder } from "./src/streamDecoder";
 import { rotate180 } from "./src/overlay";
-import { AskClient } from "./src/askClient";
+import { AskBackend, createAskBackend } from "./src/askBackend";
 import { loadViews, View } from "./src/views";
 
 const PORT = 8770;
@@ -324,7 +324,7 @@ class Server {
     private working = false;
     private frameNumber = 0;
 
-    constructor(private views: View[], private client: AskClient, private instant: boolean, private debug: boolean) {
+    constructor(private views: View[], private client: AskBackend, private instant: boolean, private debug: boolean) {
         this.watchers = views.map(view => new ViewWatcher(view, instant));
     }
 
@@ -402,9 +402,11 @@ class Server {
                     const result = await this.client.ask(image, request.prompt);
                     console.log(`    ${label} ${JSON.stringify(request.prompt)}`);
                     console.log(`    ${" ".repeat(label.length)} -> ${result.answer || "(empty)"}`);
+                    // Not every backend can separate encoding the image from prefilling the prompt,
+                    // and one that cannot reports no vision time rather than a made up split.
                     console.log(`    ${" ".repeat(label.length)}    ${result.modelMs.toFixed(0)}ms`
-                        + ` = vision ${result.visionMs.toFixed(0)}`
-                        + ` + prefill ${result.prefillMs.toFixed(0)} (${result.promptTokens} tok)`
+                        + (result.visionMs > 0 ? ` = vision ${result.visionMs.toFixed(0)} +` : ` =`)
+                        + ` prefill ${result.prefillMs.toFixed(0)} (${result.promptTokens} tok)`
                         + ` + generate ${result.generateMs.toFixed(0)} (${result.outputTokens} tok)`);
                     request.resolve({
                         index,
@@ -528,8 +530,8 @@ async function main() {
         throw new Error(`Found no view batch files to watch`);
     }
 
-    const client = new AskClient(__dirname, message => log(message));
-    console.log(`[eye2] starting Qwen3-VL, this takes a moment while the engines load`);
+    const { backend: client, name: backendName } = createAskBackend(__dirname, message => log(message));
+    console.log(`[eye2] starting Qwen3-VL on the ${backendName} backend, this takes a moment while the weights load`);
     const imageTokens = await client.start();
     await initializeDecoder();
     console.log(`[eye2] ready, ${imageTokens} image tokens per frame`);
