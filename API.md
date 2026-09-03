@@ -164,3 +164,24 @@ something attacking it.
 The backlog delivered on connect seeds what is currently true and fires nothing, so a reconnect does
 not replay history as though it were news. `client.current()` returns everything answered yes right
 now. A callback that throws is reported through `onError` and does not stop the feed.
+
+## smartpause
+
+Pauses whatever is playing when the headphones come off and resumes when they go back on. It used to
+poll eye2 in a loop and parse yes or no out of prose; it subscribes now, because the actions service
+is asking that question of every frame anyway and a second thing hammering the model with its own
+copy of it was waste.
+
+    yarn smartpause
+
+The address is baked into that script. The password is read from a fixed path in the home folder,
+beside facehuggingtoken.txt:
+
+    ~/smartcamerapassword.txt
+
+If it is not there, smartpause says so every five seconds and waits, naming the path each time,
+rather than starting up and failing quietly. Only the trailing newline an editor adds is stripped;
+anything else in the file, spaces included, is part of the password.
+
+Coming back takes effect at once, since waiting to resume is the annoying direction. Going away waits
+three seconds, roughly two answers, because one bad answer should not stop your music.
