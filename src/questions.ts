@@ -26,9 +26,17 @@ export function normalizeQuestion(question: string): string {
     return question.replace(/\s+/g, " ").trim();
 }
 
+/**
+ * Phrased so a bare phrase works, rather than requiring each entry to be written as a question.
+ *
+ * "drinking" and "hand on mouse" are what someone actually wants to watch for, and asking whether
+ * each is true of the image is a question the model has no trouble with. Making people write "is
+ * anyone drinking" bought nothing and meant the thing you configured was never the thing that came
+ * back out, since the answer is reported as the phrase you typed.
+ */
 export function buildPrompt(questions: string[]): string {
     return [
-        `Answer each question about this image.`,
+        `For each of the following, answer yes if it is true of this image and no if it is not.`,
         ``,
         ...questions.map((question, index) => `${letterFor(index)} ${question}`),
         ``,

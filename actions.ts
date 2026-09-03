@@ -420,6 +420,8 @@ td { border-top: 1px solid var(--line); padding: 7px 6px; vertical-align: top; }
 #pin input { font: inherit; padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px;
              background: none; color: inherit; min-width: 170px; }
 #pinNote { margin-bottom: 16px; min-height: 1.2em; }
+.viewbar { margin: 4px 0 8px; }
+.viewbar button { opacity: .8; }
 .badge { display: inline-block; border-radius: 4px; padding: 1px 7px; margin-right: 6px; font-size: 11px;
          text-transform: uppercase; letter-spacing: .05em; background: #8882; opacity: .8; }
 .quiet { opacity: .5; }
@@ -435,16 +437,17 @@ tr.fresh { animation: in .35s ease-out; }
      in a cafe, and hiding it only buys a typo you cannot see. -->
 <form id="secret"><input id="secretValue" type="text" placeholder="leave empty to remove" autocomplete="off" spellcheck="false"><button type="submit">set</button></form>
 <div id="secretNote" class="quiet"></div>
-<h2>questions asked of every frame</h2>
+<h2>watched in every frame</h2>
 <div class="pins"><span id="interests"></span></div>
-<form id="pin"><input id="phrase" placeholder="e.g. is a hand on the mouse" maxlength="120" autocomplete="off"><button type="submit">add</button></form>
+<form id="pin"><input id="phrase" placeholder="e.g. hand on mouse" maxlength="120" autocomplete="off"><button type="submit">add</button></form>
 <div id="pinNote" class="quiet"></div>
-<h2>answered yes right now</h2>
+<h2>true right now</h2>
 <ul id="vocabulary"></ul>
 <h2>frames <span id="buffered" class="quiet"></span></h2>
 <div><button id="capture">capture frames</button> <span id="note" class="quiet"></span></div>
 <div id="strip"></div>
 <div id="editor" hidden></div>
+<div class="viewbar"><button id="view" type="button"></button></div>
 <table><tbody id="rows"></tbody></table>
 <script>
 /**
@@ -475,9 +478,17 @@ function framePath(id) {
     return password ? base + "?password=" + encodeURIComponent(password) : base;
 }
 
+let asking = false;
 function askForPassword(why) {
+    // Several things load at once and would each get their own refusal, so only the first one asks.
+    if (asking) {
+        return;
+    }
+    asking = true;
     const given = window.prompt(why ? why + ". password:" : "password:");
     if (given === null) {
+        // Cancelled. Let the next refusal ask again, or nothing would ever prompt after a change of mind.
+        asking = false;
         return;
     }
     password = given;
@@ -522,6 +533,11 @@ async function showPasswordState() {
 }
 
 const rows = document.getElementById("rows");
+const viewToggle = document.getElementById("view");
+/** Which of the two views the log is in. Remembered per browser. */
+let everything = false;
+try { everything = localStorage.getItem("eye-view") === "everything"; } catch (error) { everything = false; }
+viewToggle.onclick = () => setView(!everything);
 const vocabulary = document.getElementById("vocabulary");
 const stats = document.getElementById("stats");
 const prompt = document.getElementById("prompt");
@@ -705,34 +721,44 @@ function row(entry) {
     when.className = "time";
     when.textContent = time(entry.at);
     const what = document.createElement("td");
-    // The whole scene as it stood after this round, which is the list the next round is asked
-    // against, with only what moved given any weight. The raw reply is a delta and reading a column
-    // of deltas means holding the scene in your head; this way the state is on the page and the
-    // change is the thing that stands out in it.
-    if (entry.full) {
-        const badge = document.createElement("span");
-        badge.className = "badge";
-        badge.textContent = "described";
-        what.append(badge);
-    }
-    for (const action of entry.state) {
+
+    function chip(text, kind) {
         const tag = document.createElement("span");
-        tag.className = entry.added.includes(action) ? "action new" : "action";
-        tag.textContent = action;
+        tag.className = kind ? "action " + kind : "action";
+        tag.textContent = text;
         what.append(tag);
     }
-    // Shown after, because they are no longer part of the list but are the other half of the change.
-    for (const action of entry.removed) {
-        const tag = document.createElement("span");
-        tag.className = "action gone";
-        tag.textContent = action;
-        what.append(tag);
-    }
-    if (entry.state.length === 0 && entry.removed.length === 0) {
-        const none = document.createElement("span");
-        none.className = "quiet";
-        none.textContent = "empty";
-        what.append(none);
+
+    // Everything true, with what changed standing out in it, or only what changed. Both are worth
+    // reading and neither is worth reading all the time: the full state answers "what is going on"
+    // and the deltas answer "when did it start", and a column of one is no use for the other.
+    if (everything) {
+        for (const answer of entry.state) {
+            chip(answer, entry.added.includes(answer) ? "new" : "");
+        }
+        // Shown after, because they are no longer true but are the other half of the change.
+        for (const answer of entry.removed) {
+            chip(answer, "gone");
+        }
+        if (entry.state.length === 0 && entry.removed.length === 0) {
+            const none = document.createElement("span");
+            none.className = "quiet";
+            none.textContent = "nothing";
+            what.append(none);
+        }
+    } else {
+        for (const answer of entry.added) {
+            chip(answer, "new");
+        }
+        for (const answer of entry.removed) {
+            chip(answer, "gone");
+        }
+        if (entry.added.length === 0 && entry.removed.length === 0) {
+            const none = document.createElement("span");
+            none.className = "quiet";
+            none.textContent = "no change";
+            what.append(none);
+        }
     }
     const cost = document.createElement("td");
     cost.className = "cost";
@@ -748,7 +774,15 @@ function row(entry) {
     return tr;
 }
 
+// Kept so switching between the two views can redraw what is already on screen, rather than showing
+// the old view until enough new rounds have arrived to replace it.
+const shown = [];
+
 function add(entry, fresh) {
+    shown.push(entry);
+    while (shown.length > LIMIT) {
+        shown.shift();
+    }
     const tr = row(entry);
     if (fresh) {
         tr.className = "fresh";
@@ -757,6 +791,22 @@ function add(entry, fresh) {
     while (rows.children.length > LIMIT) {
         rows.lastElementChild.remove();
     }
+}
+
+function redraw() {
+    rows.replaceChildren();
+    // Oldest first into a list that prepends, which leaves the newest on top.
+    for (const entry of shown) {
+        rows.prepend(row(entry));
+    }
+}
+
+function setView(wantEverything) {
+    everything = wantEverything;
+    try { localStorage.setItem("eye-view", everything ? "everything" : "changes"); } catch (error) { /* private window */ }
+    viewToggle.textContent = everything ? "showing everything" : "showing changes only";
+    viewToggle.title = everything ? "switch to changes only" : "switch to everything true";
+    redraw();
 }
 
 function setState(state) {
@@ -773,7 +823,7 @@ function setState(state) {
     if (state.questions.length === 0) {
         const none = document.createElement("span");
         none.className = "quiet";
-        none.textContent = "no questions yet, nothing is being asked";
+        none.textContent = "nothing watched yet, so nothing is being asked";
         interests.append(none);
     }
     for (const phrase of state.questions) {
@@ -802,6 +852,7 @@ function connect() {
         const message = JSON.parse(event.data);
         if (message.type === "init") {
             rows.replaceChildren();
+            shown.length = 0;
             // Oldest first into a list that prepends, which leaves the newest on top.
             for (const entry of message.entries) {
                 add(entry, false);
@@ -825,6 +876,7 @@ function connect() {
     socket.onerror = () => socket.close();
 }
 showPasswordState();
+setView(everything);
 connect();
 </script>`;
 
@@ -851,6 +903,15 @@ async function main() {
 
     const server = http.createServer((request, response) => {
         const url = new URL(request.url ?? "/", `http://${HOST}:${PORT}`);
+        // The page itself is served to anyone, because it is the thing that asks for the password.
+        // Gating it meant a browser with no password got a 401 body of json and no way to get past
+        // it: there was nothing loaded to do the asking. The page holds no camera data of its own,
+        // and every request it then makes is checked like any other.
+        if (url.pathname === "/") {
+            response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+            response.end(PAGE);
+            return;
+        }
         if (!authorised(request, url)) {
             response.writeHead(401, { "Content-Type": "application/json", "WWW-Authenticate": "Bearer" });
             response.end(JSON.stringify({ error: "A password is required" }));
@@ -976,11 +1037,6 @@ async function main() {
                     response.end(JSON.stringify({ error: (error as Error).message }));
                 }
             });
-            return;
-        }
-        if (url.pathname === "/") {
-            response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-            response.end(PAGE);
             return;
         }
         response.writeHead(404).end("not found");

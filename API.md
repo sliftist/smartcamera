@@ -6,10 +6,15 @@ authenticated, so keep it on the local network.
 
 ## The questions
 
-Every round asks the same questions and gets back yes or no for each. That is the whole design. It
-replaced asking the model to describe the scene and report what changed, which produced text nobody
-could act on: the wording drifted every round so the same fact never looked the same twice, and it
-periodically deleted its own description and started over.
+Every round asks about the same phrases and gets back yes or no for each. That is the whole design.
+It replaced asking the model to describe the scene and report what changed, which produced text
+nobody could act on: the wording drifted every round so the same fact never looked the same twice,
+and it periodically deleted its own description and started over.
+
+A phrase is a bare phrase, not a question. "drinking" and "hand on mouse" are what you actually want
+to watch for, and the model has no trouble deciding whether one is true of an image. It also means
+the thing you configured is exactly the thing that comes back out, since an answer is reported as the
+phrase you typed.
 
 Closed questions do not have that problem. An answer means the same thing today as it did an hour
 ago, a change is a flip rather than a rewording, and the reply is a few tokens no matter how much is
