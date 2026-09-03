@@ -37,6 +37,7 @@ export const DEFAULT_QUESTIONS = [
     "is wearing shirt",
     "is the door open",
     "is well lit",
+    "head tilted back with hands on face",
 ];
 
 const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
