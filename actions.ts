@@ -134,9 +134,26 @@ class Recorder {
         this.frames = this.frames.filter(frame => frame.at >= cutoff);
     }
 
-    recentFrames(): { id: string; at: number }[] {
+    /**
+     * Frames are pulled faster than questions are asked, so a frame rarely has a round of its own.
+     * The nearest round in time is what the model was saying about that moment, which is the thing a
+     * reviewer needs in front of them: you cannot say what was missed without seeing what was caught.
+     */
+    private nearestEntry(at: number): Entry | undefined {
+        return this.recent.reduce<Entry | undefined>((closest, candidate) => {
+            if (!closest) {
+                return candidate;
+            }
+            return Math.abs(candidate.at - at) < Math.abs(closest.at - at) ? candidate : closest;
+        }, undefined);
+    }
+
+    recentFrames(): { id: string; at: number; reported: string[]; raw: string }[] {
         const cutoff = Date.now() - FRAME_BUFFER_MS;
-        return this.frames.filter(frame => frame.at >= cutoff).map(frame => ({ id: frame.id, at: frame.at }));
+        return this.frames.filter(frame => frame.at >= cutoff).map(frame => {
+            const entry = this.nearestEntry(frame.at);
+            return { id: frame.id, at: frame.at, reported: entry?.actions ?? [], raw: entry?.raw ?? "" };
+        });
     }
 
     frame(id: string): Buffer | undefined {
@@ -149,12 +166,7 @@ class Recorder {
         if (!frame) {
             throw new Error(`That frame has already aged out of the buffer`);
         }
-        const entry = this.recent.reduce<Entry | undefined>((closest, candidate) => {
-            if (!closest) {
-                return candidate;
-            }
-            return Math.abs(candidate.at - frame.at) < Math.abs(closest.at - frame.at) ? candidate : closest;
-        }, undefined);
+        const entry = this.nearestEntry(frame.at);
         const stem = millisecondStamp(frame.at);
         fs.writeFileSync(path.join(TRAINING_DIRECTORY, `${stem}.jpg`), frame.jpeg);
         fs.writeFileSync(path.join(TRAINING_DIRECTORY, `${stem}.json`), JSON.stringify({
@@ -280,6 +292,17 @@ button:hover { border-color: #888; }
 #strip img { display: block; width: 100%; aspect-ratio: 1252 / 704; object-fit: cover; border-radius: 6px; border: 2px solid transparent; background: #8881; }
 #strip figure:hover img { border-color: #d9822b; }
 #strip figcaption { font-size: 12px; opacity: .65; margin-top: 5px; }
+#strip figure.picked img { border-color: #d9822b; }
+/* Inline under the grid, never over it: the point is to compare the note against the picture. */
+#editor { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 18px; align-items: start;
+          border: 1px solid var(--line); border-radius: 8px; padding: 14px; margin-bottom: 16px; }
+#editor img { width: 100%; border-radius: 6px; }
+#editor h2 { margin-top: 0; }
+#editor h2 + div { margin-bottom: 14px; }
+#editor textarea { width: 100%; box-sizing: border-box; font: inherit; padding: 8px; border-radius: 6px;
+                   border: 1px solid var(--line); background: none; color: inherit; resize: vertical; }
+#editor .buttons { display: flex; gap: 8px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+@media (max-width: 700px) { #editor { grid-template-columns: 1fr; } }
 @media (max-width: 520px) { #strip { grid-template-columns: 1fr; } }
 .saved { color: #2ba84a; }
 .breakdown { font-size: 11px; opacity: .55; white-space: nowrap; }
@@ -302,6 +325,7 @@ tr.fresh { animation: in .35s ease-out; }
 <h2>frames <span id="buffered" class="quiet"></span></h2>
 <div><button id="capture">capture frames</button> <span id="note" class="quiet"></span></div>
 <div id="strip"></div>
+<div id="editor" hidden></div>
 <table><tbody id="rows"></tbody></table>
 <script>
 const rows = document.getElementById("rows");
@@ -312,26 +336,124 @@ const buffered = document.getElementById("buffered");
 const strip = document.getElementById("strip");
 const note = document.getElementById("note");
 
-async function annotate(frame) {
-    const missing = window.prompt("What did the model miss in this frame?");
-    if (!missing || !missing.trim()) {
-        return;
+const capture = document.getElementById("capture");
+const editor = document.getElementById("editor");
+let selected = null;
+
+function closeEditor() {
+    selected = null;
+    editor.hidden = true;
+    editor.replaceChildren();
+    for (const figure of strip.children) {
+        figure.classList.remove("picked");
     }
-    const response = await fetch("/annotate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: frame.id, note: missing.trim() }),
-    });
-    const reply = await response.json();
-    note.textContent = reply.error ? ("could not save: " + reply.error) : ("saved " + reply.saved);
-    note.className = reply.error ? "quiet" : "saved";
 }
 
-document.getElementById("capture").onclick = async () => {
+/**
+ * An inline panel under the grid rather than a browser prompt. The whole point of annotating is to
+ * compare what the model said against what is in the frame, and a prompt box shows neither: it covers
+ * the page, gives you one line, and cannot show the picture you are being asked about.
+ */
+function openEditor(frame, figure) {
+    selected = frame.id;
+    for (const other of strip.children) {
+        other.classList.toggle("picked", other === figure);
+    }
+    editor.replaceChildren();
+    editor.hidden = false;
+
+    const image = document.createElement("img");
+    image.src = "/frames/" + encodeURIComponent(frame.id);
+    const side = document.createElement("div");
+
+    const when = document.createElement("h2");
+    when.textContent = "the model reported, at " + time(frame.at);
+    const chips = document.createElement("div");
+    if (frame.reported.length === 0) {
+        const none = document.createElement("span");
+        none.className = "quiet";
+        none.textContent = "nothing yet";
+        chips.append(none);
+    }
+    for (const action of frame.reported) {
+        const chip = document.createElement("span");
+        chip.className = "action";
+        chip.textContent = action;
+        chips.append(chip);
+    }
+
+    const ask = document.createElement("h2");
+    ask.textContent = "what did it miss?";
+    const field = document.createElement("textarea");
+    field.rows = 3;
+    field.placeholder = "e.g. the person is holding a phone";
+    const save = document.createElement("button");
+    save.textContent = "save for training";
+    const cancel = document.createElement("button");
+    cancel.textContent = "cancel";
+    const status = document.createElement("span");
+    status.className = "quiet";
+    const buttons = document.createElement("div");
+    buttons.className = "buttons";
+    buttons.append(save, cancel, status);
+
+    save.onclick = async () => {
+        const missing = field.value.trim();
+        if (!missing) {
+            status.textContent = "say what was missed first";
+            status.className = "quiet";
+            field.focus();
+            return;
+        }
+        save.disabled = true;
+        status.textContent = "saving";
+        status.className = "quiet";
+        const response = await fetch("/annotate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id: frame.id, note: missing }),
+        });
+        const reply = await response.json();
+        save.disabled = false;
+        if (reply.error) {
+            status.textContent = "could not save: " + reply.error;
+            status.className = "quiet";
+            return;
+        }
+        note.textContent = "saved " + reply.saved;
+        note.className = "saved";
+        closeEditor();
+    };
+    cancel.onclick = closeEditor;
+    // Enter saves, shift+enter for a second line, escape backs out.
+    field.onkeydown = event => {
+        if (event.key === "Enter" && !event.shiftKey) {
+            event.preventDefault();
+            save.click();
+        } else if (event.key === "Escape") {
+            closeEditor();
+        }
+    };
+
+    side.append(when, chips, ask, field, buttons);
+    editor.append(image, side);
+    field.focus();
+}
+
+capture.onclick = async () => {
+    // Toggles, so the grid can be put away again once you are done with it.
+    if (strip.children.length > 0) {
+        strip.replaceChildren();
+        closeEditor();
+        note.textContent = "";
+        capture.textContent = "capture frames";
+        return;
+    }
     const frames = await (await fetch("/frames")).json();
     strip.replaceChildren();
-    note.textContent = frames.length ? "click a frame to say what was missed" : "no frames held yet";
+    note.textContent = frames.length ? "click a frame to say what it missed" : "no frames held yet";
     note.className = "quiet";
+    capture.textContent = "hide frames";
     // Newest first, matching the log above it.
     for (const frame of frames.slice().reverse()) {
         const figure = document.createElement("figure");
@@ -339,9 +461,15 @@ document.getElementById("capture").onclick = async () => {
         image.src = "/frames/" + encodeURIComponent(frame.id);
         image.loading = "lazy";
         const caption = document.createElement("figcaption");
-        caption.textContent = time(frame.at);
+        caption.textContent = time(frame.at) + " · " + frame.reported.length + " reported";
         figure.append(image, caption);
-        figure.onclick = () => annotate(frame);
+        figure.onclick = () => {
+            if (selected === frame.id) {
+                closeEditor();
+            } else {
+                openEditor(frame, figure);
+            }
+        };
         strip.append(figure);
     }
 };
