@@ -325,9 +325,13 @@ table { border-collapse: collapse; width: 100%; }
 td { border-top: 1px solid var(--line); padding: 7px 6px; vertical-align: top; }
 .time { white-space: nowrap; opacity: .7; width: 1%; }
 .cost { white-space: nowrap; opacity: .55; text-align: right; width: 1%; }
-.action { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 1px 10px; margin: 2px 4px 2px 0; }
-.action.new { border-color: #d9822b; color: #d9822b; font-weight: 600; }
-.action.gone { border-color: #7a8ba0; color: #7a8ba0; text-decoration: line-through; }
+/* Carrying the scene on every row only reads if the unchanged part recedes, so it does. */
+.action { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 1px 10px;
+          margin: 2px 4px 2px 0; opacity: .5; }
+.action.new { border-color: #d9822b; color: #d9822b; font-weight: 600; opacity: 1; }
+.action.gone { border-color: #c25b5b; color: #c25b5b; text-decoration: line-through; opacity: .9; }
+/* In the annotation panel there is no diff to read, so the scene is shown at full strength. */
+#editor .action { opacity: 1; }
 .badge { display: inline-block; border-radius: 4px; padding: 1px 7px; margin-right: 6px; font-size: 11px;
          text-transform: uppercase; letter-spacing: .05em; background: #8882; opacity: .8; }
 .quiet { opacity: .5; }
@@ -504,30 +508,33 @@ function row(entry) {
     when.className = "time";
     when.textContent = time(entry.at);
     const what = document.createElement("td");
-    // Only the change. A still scene says so in one word instead of restating itself every row, which
-    // is what makes the column scannable for the moment something actually happened.
+    // The whole scene as it stood after this round, which is the list the next round is asked
+    // against, with only what moved given any weight. The raw reply is a delta and reading a column
+    // of deltas means holding the scene in your head; this way the state is on the page and the
+    // change is the thing that stands out in it.
     if (entry.full) {
         const badge = document.createElement("span");
         badge.className = "badge";
         badge.textContent = "described";
         what.append(badge);
     }
-    for (const action of entry.added) {
+    for (const action of entry.state) {
         const tag = document.createElement("span");
-        tag.className = "action new";
-        tag.textContent = "+ " + action;
+        tag.className = entry.added.includes(action) ? "action new" : "action";
+        tag.textContent = action;
         what.append(tag);
     }
+    // Shown after, because they are no longer part of the list but are the other half of the change.
     for (const action of entry.removed) {
         const tag = document.createElement("span");
         tag.className = "action gone";
-        tag.textContent = "- " + action;
+        tag.textContent = action;
         what.append(tag);
     }
-    if (!entry.full && entry.added.length === 0 && entry.removed.length === 0) {
+    if (entry.state.length === 0 && entry.removed.length === 0) {
         const none = document.createElement("span");
         none.className = "quiet";
-        none.textContent = "no change";
+        none.textContent = "empty";
         what.append(none);
     }
     const cost = document.createElement("td");
