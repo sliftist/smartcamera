@@ -36,7 +36,9 @@ growing forever: every experiment anyone ever ran would otherwise stay in the pr
 costs prompt and output tokens on every single frame. A client re-registers on connect anyway, so in
 practice a watcher that still exists puts its question straight back, within a second of a restart.
 
-The defaults, always asked and needing no registration:
+The defaults, always asked and needing no registration. They cannot be removed: a DELETE naming one
+is accepted and changes nothing, and the page shows them filled in with no cross on them. Removing
+one could only mean it disappears until the next restart, which is worse than not being able to.
 
     is a person present
     is anyone drinking

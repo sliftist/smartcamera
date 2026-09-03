@@ -166,6 +166,11 @@ class Recorder {
 
     removeQuestion(question: string): string[] {
         const item = normalizeQuestion(question);
+        // A default is permanent. It comes back on the next restart whatever anyone does, so removing
+        // one would only mean it disappears until then, which is worse than not being able to.
+        if (DEFAULT_QUESTIONS.includes(item)) {
+            return this.listQuestions();
+        }
         this.questions = this.questions.filter(candidate => candidate !== item);
         // Its last answer goes with it, so re-adding it later starts clean rather than resuming.
         this.yes = this.yes.filter(candidate => candidate !== item);
@@ -470,6 +475,8 @@ class Recorder {
             bufferSeconds: FRAME_BUFFER_MS / 1000,
             /** The questions and which of them are currently answered yes. */
             questions: this.listQuestions(),
+            /** So the page can show which are permanent, and offer no way to remove those. */
+            defaults: [...DEFAULT_QUESTIONS],
             yes: [...this.yes],
             // Sent so the wording can be reviewed against the answers it is producing, live.
             prompt: buildPrompt(this.questions),
@@ -532,7 +539,9 @@ td { border-top: 1px solid var(--line); padding: 7px 6px; vertical-align: top; }
 #editor .action { opacity: 1; }
 .pins { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 6px; }
 .pin { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 999px;
-       padding: 2px 4px 2px 11px; margin-right: 6px; }
+       padding: 2px 4px 2px 11px; margin-right: 6px; margin-bottom: 4px; }
+/* Permanent ones read as part of the furniture: filled, no cross, nothing to click. */
+.pin.always { padding: 2px 11px; background: #8882; border-color: transparent; }
               font-size: 15px; line-height: 1; border-radius: 999px; }
 .pin button:hover { opacity: 1; }
 #pin, #secret { display: inline-flex; gap: 6px; margin-bottom: 6px; }
@@ -1173,21 +1182,34 @@ function setState(state) {
         none.textContent = "nothing watched yet, so nothing is being asked";
         interests.append(none);
     }
-    for (const phrase of state.questions) {
+    // Permanent ones first and marked as such, with no cross on them. A default survives a restart
+    // whatever anyone does, so offering to remove one would only mean it vanishes until then.
+    const defaults = state.defaults || [];
+    const ordered = state.questions.slice().sort((left, right) =>
+        Number(defaults.includes(right)) - Number(defaults.includes(left)));
+    for (const phrase of ordered) {
         const pin = document.createElement("span");
-        // Green while the scene actually holds it, which is the same condition an api caller sees.
-        pin.className = "pin";
+        const permanent = defaults.includes(phrase);
+        pin.className = permanent ? "pin always" : "pin";
         pin.append(phrase);
-        const remove = document.createElement("button");
-        remove.type = "button";
-        remove.textContent = "×";
-        remove.title = "stop asking " + phrase;
-        remove.onclick = async () => {
-            await api("/questions?question=" + encodeURIComponent(phrase), { method: "DELETE" });
-            pinNote.textContent = "no longer asking " + phrase;
-        };
-        pin.append(remove);
+        if (permanent) {
+            pin.title = "always asked, and cannot be removed";
+        } else {
+            const remove = document.createElement("button");
+            remove.type = "button";
+            remove.textContent = "×";
+            remove.title = "stop asking " + phrase;
+            remove.onclick = async () => {
+                await api("/questions?question=" + encodeURIComponent(phrase), { method: "DELETE" });
+                pinNote.textContent = "no longer asking " + phrase;
+            };
+            pin.append(remove);
+        }
         interests.append(pin);
+    }
+    if (state.questions.length > defaults.length) {
+        pinNote.textContent = "the plain ones were added by something and go away on a restart"
+            + " unless whatever added them asks again";
     }
 }
 
@@ -1421,7 +1443,7 @@ async function main() {
                 response.end(JSON.stringify(payload));
             };
             if (request.method === "GET") {
-                send(200, { questions: recorder.listQuestions() });
+                send(200, { questions: recorder.listQuestions(), defaults: DEFAULT_QUESTIONS });
                 return;
             }
             if (request.method === "DELETE") {
