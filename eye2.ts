@@ -26,8 +26,17 @@ const INSTANT_MAX_AGE_MS = 1000;
  * turns instant mode back into keyframe mode for any caller that pauses between questions.
  */
 const IDLE_GRACE_MS = 5 * 1000;
-/** Access units held while a decode is in flight before we give up and rejoin at a keyframe. */
-const MAX_QUEUED_UNITS = 16;
+/**
+ * Access units held while a decode is in flight before we give up and rejoin at a keyframe.
+ *
+ * Generous on purpose. Encoding a jpeg blocks this loop for tens of milliseconds and the stream is
+ * tcp, so a stall does not lose packets, it delivers them in a burst afterwards. At 16 a couple of
+ * those bursts a second was enough to throw the queue away roughly once per keyframe, and every one
+ * of those is a visible tear. The decoder catches up at about 80 frames a second once it is let run,
+ * so four seconds of backlog drains in well under one. Latency is bounded by the caller anyway, which
+ * refuses a frame older than INSTANT_MAX_AGE_MS.
+ */
+const MAX_QUEUED_UNITS = 60;
 /** The last this many analysed frames are kept on disk, clobbering the oldest, named just by number. */
 const KEPT_FRAMES = 100;
 const FRAME_DIRECTORY = path.join(__dirname, "frames");
@@ -301,6 +310,11 @@ class ViewWatcher {
             if (this.queue.length > MAX_QUEUED_UNITS) {
                 this.queue.length = 0;
                 this.needKeyframe = true;
+                // The dropped units are the reference frames everything after them was predicted from,
+                // so the decoder is holding state that no longer describes the stream. Waiting for a
+                // keyframe is not enough on its own: unless that state is thrown away, the next frames
+                // decode against it and come out as smeared blocks over anything that moved.
+                this.decoder?.reset();
                 this.resyncs++;
                 return;
             }
@@ -456,7 +470,12 @@ class Server {
     private async saveFrame(image: DecodedFrame, file: string) {
         try {
             await fs.promises.mkdir(FRAME_DIRECTORY, { recursive: true });
-            await fs.promises.writeFile(file, encodeJpeg(image.rgb, image.width, image.height));
+            // Saved at the size the model was shown rather than full resolution. Encoding 1920x1080
+            // blocks this loop for about 176ms against about 76ms for the smaller one, and that stall
+            // is charged to reading the stream. Detail the model never saw is not worth a tear, and a
+            // debug frame that matches what it was actually looking at is the more useful one anyway.
+            const scaled = resizeToFit(image, SERVED_FRAME_WIDTH, SERVED_FRAME_HEIGHT);
+            await fs.promises.writeFile(file, encodeJpeg(scaled.rgb, scaled.width, scaled.height));
         } catch (error) {
             log(`could not write ${file}: ${(error as Error).message}`);
         }
