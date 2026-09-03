@@ -431,7 +431,9 @@ tr.fresh { animation: in .35s ease-out; }
 <div class="meta"><span id="link"></span><span id="stats">connecting</span></div>
 <details><summary>the prompt being sent right now</summary><pre id="prompt"></pre></details>
 <h2>password</h2>
-<form id="secret"><input id="secretValue" type="password" placeholder="leave empty to remove" autocomplete="new-password"><button type="submit">set</button></form>
+<!-- Not masked. You are choosing a shared password for a camera on your own network, not entering one
+     in a cafe, and hiding it only buys a typo you cannot see. -->
+<form id="secret"><input id="secretValue" type="text" placeholder="leave empty to remove" autocomplete="off" spellcheck="false"><button type="submit">set</button></form>
 <div id="secretNote" class="quiet"></div>
 <h2>questions asked of every frame</h2>
 <div class="pins"><span id="interests"></span></div>
