@@ -106,7 +106,7 @@ function readBody(request: http.IncomingMessage): Promise<string> {
 }
 
 /** An entry arrives, or the configuration around it changed and subscribers should refresh. */
-type Listener = (entry: Entry | undefined) => void;
+type Listener = (entry: Entry | undefined, cleared?: boolean) => void;
 
 class Recorder {
     private questions: string[] = [];
@@ -230,6 +230,42 @@ class Recorder {
         for (const listener of this.listeners) {
             listener(undefined);
         }
+    }
+
+    /**
+     * Throws away every day file and starts again from what is true right now.
+     *
+     * A fresh file is written immediately rather than waiting for the next round, and it holds the
+     * current state rather than nothing. Both matter: the files hold changes, so one that began empty
+     * would replay against an empty scene and get everything already true at the moment of clearing
+     * wrong for as long as it stayed true.
+     */
+    clearHistory(): { removed: number } {
+        this.stream?.end();
+        this.stream = undefined;
+        let removed = 0;
+        for (const name of fs.readdirSync(LOG_DIRECTORY)) {
+            if (/^\d{4}-\d{2}-\d{2}\.jsonl$/.test(name)) {
+                fs.rmSync(path.join(LOG_DIRECTORY, name), { force: true });
+                removed++;
+            }
+        }
+        this.recent = [];
+        this.day = "";
+        this.lastWroteAtMs = 0;
+
+        const at = Date.now();
+        const today = dayStamp(at);
+        this.stream = fs.createWriteStream(path.join(LOG_DIRECTORY, `${today}.jsonl`), { flags: "a" });
+        this.stream.write(JSON.stringify({ at, state: this.yes }) + "\n");
+        this.day = today;
+        this.lastWroteAtMs = at;
+
+        log(`cleared ${removed} day file${removed === 1 ? "" : "s"}, starting again from ${this.yes.length} true`);
+        for (const listener of this.listeners) {
+            listener(undefined, true);
+        }
+        return { removed };
     }
 
     /** Restarting mid day must not start the page from nothing, or re-describe a scene it knows. */
@@ -584,6 +620,7 @@ tr.fresh { animation: in .35s ease-out; }
 <form id="secret"><input id="secretValue" type="text" placeholder="leave empty to remove" autocomplete="off" spellcheck="false"><button type="submit">set</button></form>
 <div id="secretNote" class="quiet"></div>
 <h2>history <span id="statsSpan" class="quiet"></span></h2>
+<div class="viewbar"><button id="clearHistory" type="button">clear history</button></div>
 <table id="historyTable"></table>
 <div id="statsNote" class="quiet"></div>
 <h2>resolution shown to the model</h2>
@@ -871,6 +908,16 @@ document.getElementById("showDeviations").onclick = async () => {
         }
         deviationsHolder.append(figure);
     }
+};
+
+document.getElementById("clearHistory").onclick = async () => {
+    if (!window.confirm("Delete every day file and start the history again from what is true now?")) {
+        return;
+    }
+    const reply = await (await api("/history", { method: "DELETE" })).json();
+    document.getElementById("statsNote").textContent = "cleared " + reply.removed
+        + " day file" + (reply.removed === 1 ? "" : "s");
+    await showHistory();
 };
 
 async function showPasswordState() {
@@ -1226,6 +1273,12 @@ function connect() {
             for (const entry of message.entries) {
                 add(entry, false);
             }
+        } else if (message.type === "cleared") {
+            // The log those rows came from is gone, so keeping them on screen would be showing
+            // history that no longer exists.
+            rows.replaceChildren();
+            shown.length = 0;
+            showHistory();
         } else if (message.type === "entry") {
             add(message.entry, true);
         }
@@ -1366,6 +1419,11 @@ async function main() {
         }
         // The raw lines, for anything that wants to do its own arithmetic. They are small: a day of
         // this is tens of kilobytes, because only changes and a minute heartbeat are written.
+        if (url.pathname === "/history" && request.method === "DELETE") {
+            response.writeHead(200, { "Content-Type": "application/json" });
+            response.end(JSON.stringify(recorder.clearHistory()));
+            return;
+        }
         if (url.pathname === "/history") {
             const days = Math.min(365, Math.max(1, Number(url.searchParams.get("days") ?? 7)));
             const { events, days: names } = readHistory(LOG_DIRECTORY, days);
@@ -1532,15 +1590,16 @@ async function main() {
     });
     sockets.on("connection", (socket: WebSocket) => {
         socket.send(JSON.stringify({ type: "init", entries: recorder.entriesSince(0, BACKLOG_LIMIT), state: recorder.state }));
-        const stop = recorder.listen(entry => {
+        const stop = recorder.listen((entry, cleared) => {
             if (socket.readyState !== socket.OPEN) {
                 return;
             }
             // No entry means the questions changed rather than a round landing, so subscribers
-            // get the new state without a fabricated round to go with it.
+            // get the new state without a fabricated round to go with it. Cleared is its own kind,
+            // because a page holding rows for a log that no longer exists should drop them.
             socket.send(entry
                 ? JSON.stringify({ type: "entry", entry, state: recorder.state })
-                : JSON.stringify({ type: "state", state: recorder.state }));
+                : JSON.stringify({ type: cleared ? "cleared" : "state", state: recorder.state }));
         });
         socket.on("close", stop);
         socket.on("error", stop);

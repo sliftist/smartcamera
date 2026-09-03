@@ -4,6 +4,7 @@ import * as path from "path";
 import { formatDateTime } from "socket-function/src/formatting/format";
 import { pausePlayingMedia, resumeMedia } from "./src/media";
 import { EyeClient } from "./src/eyeClient";
+import { HEADPHONES_QUESTION } from "./src/questions";
 
 /**
  * Pauses whatever is playing when the headphones come off, and resumes when they go back on.
@@ -13,8 +14,14 @@ import { EyeClient } from "./src/eyeClient";
  * second thing hammering the model with its own copy of the same question.
  */
 
-/** The phrase watched. Registered with the service automatically if it is not already being asked. */
-const PHRASE = "wearing headphones";
+/**
+ * One of the service defaults, rather than a phrase of its own.
+ *
+ * Watching "wearing headphones" registered a tenth question for something already being asked as
+ * "is anyone wearing headphones", so every frame answered the same thing twice, forever, for nothing.
+ * Naming the default means the client registers nothing at all.
+ */
+const PHRASE = HEADPHONES_QUESTION;
 /**
  * Where the password is expected. A fixed path in the home folder, matching facehuggingtoken.txt
  * beside it, so nothing has to be passed on a command line or baked into a service file.

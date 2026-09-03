@@ -20,13 +20,20 @@
  * costs prompt and output tokens on every single frame. A client that still cares re-registers on
  * connect, which it does anyway, and anything in here needs no registering at all.
  */
+/**
+ * Named because smartpause watches exactly this one. Spelling it out in both places would mean a
+ * reword here quietly turned into a tenth question there, asked of every frame forever, for
+ * something already being asked.
+ */
+export const HEADPHONES_QUESTION = "is anyone wearing headphones";
+
 export const DEFAULT_QUESTIONS = [
     "is a person present",
     "is anyone drinking",
     "is a hand on the mouse",
     "is anyone typing",
     "is anyone eating",
-    "is anyone wearing headphones",
+    HEADPHONES_QUESTION,
     "is wearing shirt",
     "is the door open",
     "is well lit",
