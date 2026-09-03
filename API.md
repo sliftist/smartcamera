@@ -6,19 +6,15 @@ authenticated, so keep it on the local network.
 
 ## The questions
 
-Every round asks about the same phrases and gets back yes or no for each. That is the whole design.
-It replaced asking the model to describe the scene and report what changed, which produced text
-nobody could act on: the wording drifted every round so the same fact never looked the same twice,
-and it periodically deleted its own description and started over.
-
-A phrase is a bare phrase, not a question. "drinking" and "hand on mouse" are what you actually want
-to watch for, and the model has no trouble deciding whether one is true of an image. It also means
-the thing you configured is exactly the thing that comes back out, since an answer is reported as the
-phrase you typed.
+Every round asks about the same fixed list and gets back the words of whatever is true. That is the
+whole design. It replaced asking the model to describe the scene and report what changed, which
+produced text nobody could act on: the wording drifted every round so the same fact never looked the
+same twice, and it periodically deleted its own description and started over.
 
 Closed questions do not have that problem. An answer means the same thing today as it did an hour
 ago, a change is a flip rather than a rewording, and the reply is a few tokens no matter how much is
-going on in the room.
+going on in the room. The thing you configured is also exactly the thing that comes back out, since
+an answer is reported as the question you typed rather than as the word the model said.
 
     GET    /questions                                          -> { watches, questions, defaults }
     POST   /questions {"question":"...","keyword":"phone"}       add, or rename an existing keyword
@@ -48,7 +44,7 @@ costs about five output tokens rather than one per question, and generating was 
 cost: this took a round from 1618ms to 1115ms.
 
 Words rather than letters on purpose. A letter is the same one token, but the model has to hold a
-lookup table in its head to use one, where drinking it can simply reason about. It also makes a
+lookup table in its head to use one, where "drinking" it can simply reason about. It also makes a
 wrong answer legible. A stray letter tells you nothing; a stray word tells you what it thought it
 saw, which is why words that were never offered are kept and shown on the row rather than dropped.
 
