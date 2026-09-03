@@ -1,4 +1,4 @@
-import { buildPrompt, parseRound, offeredScene, diffScenes, matchInterests } from "../src/scene";
+import { buildPrompt, parseRound, splitReply, diffScenes } from "../src/scene";
 
 let failures = 0;
 
@@ -64,34 +64,71 @@ check("appearing", diffScenes(scene, [...scene, "drinking"]), { added: ["drinkin
 check("leaving", diffScenes(scene, scene.slice(0, 2)), { added: [], removed: ["headphones on head"] });
 check("a still scene", diffScenes(scene, [...scene]), { added: [], removed: [] });
 
-console.log(`\nphrases of interest ride in the scene list:`);
-const interests = ["drinking", "person at door"];
-const offered = offeredScene(scene, interests);
-check("both are offered to the model", offered, [...scene, "drinking", "person at door"]);
-check("an interest already in the scene is not offered twice",
-    offeredScene([...scene, "drinking"], interests), [...scene, "drinking", "person at door"]);
+// Pinned phrases are a separate question with a lettered answer. Slipping them into the scene list
+// did not work: the model never integrated them, spent most of a reply declining the same ones, and
+// flickered on the marginal ones. The letters are an encoding between here and the model only.
+console.log(`\npinned phrases are answered by letter, expanded here:`);
+const interests = ["drinking", "person at door", "hand on mouse"];
+const matchOf = (reply: string) => splitReply(reply, interests).matched;
+check("letters expand to phrases", matchOf("nothing TRUE=AC"), ["drinking", "hand on mouse"]);
+check("lowercase", matchOf("nothing true=b"), ["person at door"]);
+check("spaces around it", matchOf("nothing TRUE = B"), ["person at door"]);
+check("none", matchOf("nothing TRUE=none"), []);
+check("separated by pipes", matchOf("nothing TRUE=A|C"), ["drinking", "hand on mouse"]);
+check("separated by spaces", matchOf("nothing TRUE=A C"), ["drinking", "hand on mouse"]);
+check("no answer at all", matchOf("remove arms crossed"), []);
+check("a token that is not letters ends the answer", matchOf("nothing TRUE=A remove the cup"), ["drinking"]);
 
-// The model says the pinned phrases are not happening, every round, because it is asked every round.
-// That is an answer, not a change, and the diff against the real scene has to stay empty.
-const saidNo = parseRound("remove drinking | remove person at door", offered, false);
-check("declining both leaves the scene alone", saidNo, scene);
-check("declining is not a scene change", diffScenes(scene, saidNo), { added: [], removed: [] });
-check("nothing matched", matchInterests(saidNo, interests), []);
+// "none" spelled out must not be read letter by letter. With seven phrases pinned the e in none is
+// the fifth of them, so reading it that way reports something nobody is doing.
+const seven = ["eating food", "drinking from cup", "hand on mouse", "typing on keyboard",
+    "arms crossed", "wearing headphones on head", "brushing teeth"];
+check("none is a word, not five letters", splitReply("nothing TRUE=none", seven).matched, []);
+check("and the e in it is not arms crossed", splitReply("nothing TRUE=none", seven).matched.includes("arms crossed"), false);
+check("a real answer against the same list", splitReply("nothing TRUE=CF", seven).matched,
+    ["hand on mouse", "wearing headphones on head"]);
+check("with nothing pinned nothing is looked for", splitReply("nothing", []),
+    { changes: "nothing", matched: [] });
 
-const saidYes = parseRound("remove person at door", offered, false);
-check("keeping one matches it", matchInterests(saidYes, interests), ["drinking"]);
-check("and it reads as appearing", diffScenes(scene, saidYes), { added: ["drinking"], removed: [] });
+// The answer must be cut out of the text, or it is read as a scene item. That is exactly how the
+// scene came to hold "c", "f" and "f wearing headphones on head".
+console.log(`\nthe answer never reaches the scene:`);
+const scened = (reply: string) => parseRound(splitReply(reply, interests).changes, scene, false);
+check("a letter answer adds nothing", scened("nothing TRUE=AC"), scene);
+check("even split across lines", scened("nothing\nTRUE=AC"), scene);
+check("alongside a real change", scened("holding a phone TRUE=A"), [...scene, "holding a phone"]);
+check("a stray single letter is never an item", parseRound("c|f|holding a phone", scene, false),
+    [...scene, "holding a phone"]);
+
+// What the model actually writes into the changes half once it has letters in hand.
+console.log(`\nletter debris in the changes half:`);
+check("a comma after remove still removes", parseRound("remove,green cup on desk", scene, false),
+    ["person at desk", "headphones on head"]);
+check("a letter tag on an item is stripped", parseRound("C holding a phone", scene, false),
+    [...scene, "holding a phone"]);
+check("a letter tagged removal still removes", parseRound("remove,C green cup on desk", scene, false),
+    ["person at desk", "headphones on head"]);
+check("left is not a removal word", parseRound("left hand on mouse", scene, false),
+    [...scene, "left hand on mouse"]);
+
+console.log(`\na pinned phrase turning on reads as a change:`);
+check("appearing", diffScenes([...scene], [...scene, "drinking"]), { added: ["drinking"], removed: [] });
+check("going away", diffScenes([...scene, "drinking"], [...scene]), { added: [], removed: ["drinking"] });
+check("staying on is not a change", diffScenes([...scene, "drinking"], [...scene, "drinking"]),
+    { added: [], removed: [] });
 
 console.log(`\nprompts:`);
-check("empty scene asks for a description", buildPrompt([], false).startsWith("Describe this scene"), true);
-check("known scene asks for changes", buildPrompt(scene, false).includes("report only what has changed"), true);
-check("items are plain lines", buildPrompt(scene, false).includes("\ngreen cup on desk\n"), true);
-check("nothing is numbered", /^\d+\./m.test(buildPrompt(scene, false)), false);
-check("nothing is bulleted", /^[-*]/m.test(buildPrompt(scene, false)), false);
+check("empty scene asks for a description", buildPrompt([], [], false).startsWith("Describe this scene"), true);
+check("known scene asks for changes", buildPrompt(scene, [], false).includes("report only what has changed"), true);
+check("items are plain lines", buildPrompt(scene, [], false).includes("\ngreen cup on desk\n"), true);
+check("nothing is numbered", /^\d+\./m.test(buildPrompt(scene, [], false)), false);
+check("nothing is bulleted", /^[-*]/m.test(buildPrompt(scene, [], false)), false);
 check("removal is a word with no punctuation after it",
-    buildPrompt(scene, false).includes("Put remove in front of"), true);
-check("pinned phrases are ordinary list items", buildPrompt(offered, false).includes("\ndrinking\n"), true);
-check("and get no instruction of their own", buildPrompt(offered, false).toLowerCase().includes("exactly"), false);
+    buildPrompt(scene, [], false).includes("Put remove in front of"), true);
+check("pinned phrases are asked as a lettered question", buildPrompt(scene, interests, false).includes("A drinking"), true);
+check("and are kept out of the scene list", buildPrompt(scene, interests, false).includes("\ndrinking\n"), false);
+check("an anchored answer is asked for", buildPrompt(scene, interests, false).includes("TRUE="), true);
+check("with none pinned there is one line", buildPrompt(scene, [], false).includes("on one line"), true);
 
 console.log(failures === 0 ? `\nall passed` : `\n${failures} failed`);
 process.exit(failures === 0 ? 0 : 1);

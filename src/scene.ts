@@ -29,7 +29,12 @@ const MAX_WORDS = 6;
  * deletion. That is not hypothetical: with a dash it emptied the scene every second round and spent
  * its time describing the same room over and over.
  */
-const REMOVAL = /^(remove|removed|gone|no longer|left)\s*:?\s+/i;
+// A comma is allowed after the word because it writes "remove,f" as readily as "remove f", and a
+// removal that fails to parse becomes an addition of its own text. "left" is deliberately not here:
+// "left hand on mouse" is a thing a camera sees, not a removal.
+const REMOVAL = /^(remove|removed|gone|no longer)\s*[,:]?\s*/i;
+/** A letter the model tagged an item with, as in "C hand on mouse". Uppercase only, so "a cat" survives. */
+const LETTER_TAG = /^[A-Z][\s,.:)\]]+/;
 /**
  * Stripped off the front of an item before anything else. Bullets and numbers included, so that an
  * answer which just echoes the list back lands on the items already in the scene and changes nothing,
@@ -40,50 +45,86 @@ const NOTHING = /^(nothing|no change|none|unchanged|same|nothing has changed)$/i
 
 /** Normalized the same way scene items are, so a caller's phrase and a model's answer compare equal. */
 export function normalizePhrase(phrase: string): string {
-    return phrase.replace(LEADING_MARKER, "").replace(/[.,;]+$/, "").trim().toLowerCase();
+    return phrase
+        .replace(LETTER_TAG, "")
+        .replace(LEADING_MARKER, "")
+        .replace(/[.,;]+$/, "")
+        .trim()
+        .toLowerCase();
+}
+
+const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+/** What the answer about pinned phrases is anchored on, so it can be found wherever it lands. */
+const ANSWER_TOKEN = "TRUE=";
+const ANSWER_PATTERN = /TRUE\s*=\s*/i;
+const NO_LETTERS = /^(none|nothing|n\/a|no)\b/i;
+
+export function letterFor(index: number): string {
+    return LETTERS[index] ?? "?";
 }
 
 /**
- * The list the model is actually shown: the scene, plus every pinned phrase that is not already in it.
+ * A separate question, answered separately.
  *
- * This is the whole mechanism for phrases of interest, and it needs no instruction of its own. A
- * pinned phrase sits in the list like anything else, so the model answers the question it is already
- * being asked about everything else: is this still true? If it is not, it says so and the phrase is
- * simply absent this round. Telling the model about the phrases in prose instead does not work; asked
- * that way it answered with nothing but the pinned list, having read it as the answer sheet.
+ * Pinned phrases used to be slipped into the scene list as ordinary items, on the theory that the
+ * model would then keep the caller's exact wording for free. It did not. It never integrated them,
+ * spent most of every reply declining the same five, and flickered on the marginal ones. Asked
+ * directly which of a lettered list are true, it just answers, and the answer costs a letter.
+ *
+ * The deltas a caller sees for these are worked out here rather than reported by the model, the same
+ * way scene changes are.
  */
-export function offeredScene(state: string[], interests: string[]): string[] {
-    return [...state, ...interests.filter(interest => !state.includes(interest))];
+function interestQuestion(interests: string[]): string[] {
+    if (interests.length === 0) {
+        return [];
+    }
+    return [
+        ``,
+        `Separately, decide which of these are true in the image right now:`,
+        ...interests.map((interest, index) => `${letterFor(index)} ${interest}`),
+    ];
 }
 
-export function buildPrompt(offered: string[], full: boolean): string {
-    if (full || offered.length === 0) {
+function outputInstruction(interests: string[]): string[] {
+    if (interests.length === 0) {
+        return [``, `Write everything on one line separated by | and write nothing else.`];
+    }
+    // Anchored on a token rather than on being the second line. Asked for two lines it put a newline
+    // between every item instead, mixed the letters into the changes, and split them across lines, so
+    // there was no line to point at. A token can be found wherever it ends up.
+    return [
+        ``,
+        `Write the changes separated by |`,
+        `Then write ${ANSWER_TOKEN} followed by the letters that are true, with no spaces.`,
+        `Write ${ANSWER_TOKEN}none if none of them are true.`,
+    ];
+}
+
+export function buildPrompt(scene: string[], interests: string[], full: boolean): string {
+    if (full || scene.length === 0) {
         return [
             `Describe this scene as a list of the objects in it and the actions happening.`,
             `Briefly describe each object, and say what each person is doing.`,
             `Keep each one to a short phrase of at most ${MAX_WORDS} words.`,
-            ``,
-            `Write them on one line separated by | and write nothing else.`,
+            ...interestQuestion(interests),
+            ...outputInstruction(interests),
         ].join("\n");
     }
-    // Pinned phrases sit in this list exactly like anything else, with no marking to say they are
-    // different. That is what makes the model keep the caller's wording: it is being shown the phrase
-    // as something already true of the scene, so confirming it costs nothing and rewording it does.
     // Plain lines, no numbers and no bullets. A numbered list gets answered by number, and a position
     // is a worse thing to be handed than the text: it means nothing on its own, it has to be resolved
     // against exactly the list that was sent, and getting that resolution wrong silently deletes the
     // wrong item. The text says what it means and matches whatever it matches.
     return [
         `A moment ago this scene held:`,
-        ...offered,
+        ...scene,
         ``,
         `Look at the image now and report only what has changed.`,
         `Write anything new as a short phrase of at most ${MAX_WORDS} words.`,
         `Put remove in front of anything above that is no longer true.`,
         `Do not repeat anything above that is still true.`,
         `If nothing has changed, write: nothing`,
-        ``,
-        `Write everything on one line separated by | and write nothing else.`,
+        ...interestQuestion(interests),
+        ...outputInstruction(interests),
     ].join("\n");
 }
 
@@ -166,6 +207,11 @@ export function parseRound(reply: string, offered: string[], full: boolean): str
         if (!item || next.includes(item)) {
             continue;
         }
+        // A single character is never a description of anything. It is a stray letter from the pinned
+        // phrase answer that got past the split, and letting one in is how the scene came to hold "c".
+        if (item.length < 2) {
+            continue;
+        }
         next.push(item);
     }
 
@@ -187,7 +233,51 @@ export function diffScenes(before: string[], after: string[]): { added: string[]
     };
 }
 
-/** Which pinned phrases the scene currently holds, as an exact match on the wording asked for. */
-export function matchInterests(state: string[], interests: string[]): string[] {
-    return interests.filter(interest => state.includes(interest));
+/**
+ * Splits a reply into the scene changes and the pinned phrases the model says are true.
+ *
+ * The letters are expanded to their phrases here and the answer is cut out of the text before the
+ * changes are parsed. Both halves of that matter. A letter is an encoding between this and the model
+ * and must never reach anything downstream, and if the answer is left in the text it is read as a
+ * scene item: the scene really did end up holding "c", "f" and "f wearing headphones on head".
+ */
+export function splitReply(reply: string, interests: string[]): { changes: string; matched: string[] } {
+    const flattened = reply.replace(/\r?\n/g, " | ");
+    if (interests.length === 0) {
+        return { changes: flattened, matched: [] };
+    }
+    const answer = ANSWER_PATTERN.exec(flattened);
+    if (!answer) {
+        return { changes: flattened, matched: [] };
+    }
+    const tail = flattened.slice(answer.index + answer[0].length);
+    if (NO_LETTERS.test(tail)) {
+        // Spelled out rather than left empty. Reading it letter by letter would match whatever "none"
+        // happens to spell, and with seven phrases pinned the e in none is "arms crossed".
+        return { changes: flattened.slice(0, answer.index), matched: [] };
+    }
+    // It separates them however it likes: TRUE=CF, TRUE=C F, TRUE=C|F. Tokens are taken while they
+    // still read as letters and abandoned at the first one that does not, so anything the model wrote
+    // after the answer stays out of it.
+    const matched: string[] = [];
+    let consumed = 0;
+    for (const token of tail.split(/([^A-Za-z]+)/)) {
+        if (/^[^A-Za-z]*$/.test(token)) {
+            consumed += token.length;
+            continue;
+        }
+        const letters = [...token.toUpperCase()].map(character => LETTERS.indexOf(character));
+        if (letters.some(index => index < 0 || index >= interests.length)) {
+            break;
+        }
+        for (const index of letters) {
+            if (!matched.includes(interests[index])) {
+                matched.push(interests[index]);
+            }
+        }
+        consumed += token.length;
+    }
+    // Only the span actually read as the answer is cut, so a reply that put changes after it keeps them.
+    const changes = flattened.slice(0, answer.index) + " " + tail.slice(consumed);
+    return { changes, matched };
 }

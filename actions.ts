@@ -4,7 +4,7 @@ import * as path from "path";
 import { WebSocketServer, WebSocket } from "ws";
 import { formatDateTime } from "socket-function/src/formatting/format";
 import { dayStamp, millisecondStamp } from "./src/timestamps";
-import { buildPrompt, parseRound, offeredScene, diffScenes, matchInterests, normalizePhrase, FULL_DESCRIBE_EVERY } from "./src/scene";
+import { buildPrompt, parseRound, splitReply, diffScenes, normalizePhrase, FULL_DESCRIBE_EVERY } from "./src/scene";
 
 const EYE2_URL = "http://127.0.0.1:8770";
 const PORT = 8772;
@@ -50,7 +50,7 @@ function log(message: string) {
 
 type Entry = {
     at: number;
-    /** The whole scene after this round, with pinned phrases taken back out. */
+    /** The whole scene after this round. Pinned phrases are answered separately and live in matched. */
     state: string[];
     added: string[];
     removed: string[];
@@ -86,6 +86,8 @@ type Listener = (entry: Entry | undefined) => void;
 class Recorder {
     private scene: string[] = [];
     private interests: string[] = [];
+    /** What was true last round, so a pinned phrase appearing or leaving reads as a change. */
+    private matched: string[] = [];
     /** Counts up to a full description, so drift in the carried state gets cleared out periodically. */
     private sinceFull = 0;
     private recent: Entry[] = [];
@@ -173,6 +175,7 @@ class Recorder {
                 this.recent.push(entry);
                 // The last round's scene is the scene; it was already rebuilt once, on the way in.
                 this.scene = entry.state ?? [];
+                this.matched = entry.matched ?? [];
             } catch {
                 // A half written last line is expected after a hard stop, and is not worth a complaint.
             }
@@ -250,7 +253,7 @@ class Recorder {
             missing: note,
             reported: entry?.state ?? [],
             raw: entry?.raw ?? "",
-            prompt: buildPrompt(offeredScene(this.scene, this.interests), false),
+            prompt: buildPrompt(this.scene, this.interests, false),
         }, undefined, 2));
         log(`annotated ${stem}: ${JSON.stringify(note)}`);
         return { saved: `${stem}.jpg` };
@@ -283,10 +286,7 @@ class Recorder {
         // A full description when the scene is unknown, and again every so often to clear out anything
         // the model stopped mentioning without ever saying it had gone.
         const full = this.scene.length === 0 || this.sinceFull >= this.describeEvery;
-        // Pinned phrases go in as ordinary list items, so the model answers the same question about
-        // them as about everything else rather than being told about them separately.
-        const offered = offeredScene(this.scene, this.interests);
-        const prompt = buildPrompt(offered, full);
+        const prompt = buildPrompt(this.scene, this.interests, full);
         const at = Date.now();
         let reply: Record<string, unknown>;
         try {
@@ -309,13 +309,15 @@ class Recorder {
         }
 
         const raw = String(reply.answer ?? "");
-        const applied = parseRound(raw, offered, full);
-        const matched = matchInterests(applied, this.interests);
-        // Pinned phrases are a question we ask every round, not part of the scene, so they are taken
-        // back out before anything is compared. Otherwise every round the model declines one would
-        // read as something leaving the room.
-        const state = applied.filter(item => !this.interests.includes(item));
-        const { added, removed } = diffScenes(this.scene, state);
+        // Two answers in one reply: what changed in the scene, and which pinned phrases are true.
+        const { changes, matched } = splitReply(raw, this.interests);
+        // A pinned phrase is answered by letter and never belongs in the scene, but the model writes
+        // it into the changes half as well. Dropping it there keeps one fact in one place.
+        const state = parseRound(changes, this.scene, full)
+            .filter(item => !this.interests.includes(item));
+        // Pinned phrases are diffed alongside the scene, so a caller watching for one sees it appear
+        // and leave in the same stream as everything else rather than having to track it itself.
+        const { added, removed } = diffScenes([...this.scene, ...this.matched], [...state, ...matched]);
         const entry: Entry = {
             at,
             state,
@@ -332,6 +334,7 @@ class Recorder {
             analyzeMs: Number(reply.analyzeMs ?? 0),
         };
         this.scene = state;
+        this.matched = matched;
         this.sinceFull = full ? 0 : this.sinceFull + 1;
         this.append(entry);
         this.rounds++;
@@ -353,10 +356,10 @@ class Recorder {
             /** What the model currently believes is in front of it, which is what it is asked against. */
             scene: this.scene,
             interests: this.listInterests(),
-            matched: matchInterests(this.scene, this.interests),
+            matched: [...this.matched],
             roundsUntilDescribe: Math.max(0, this.describeEvery - this.sinceFull),
             // Sent so the wording can be reviewed against the answers it is producing, live.
-            prompt: buildPrompt(offeredScene(this.scene, this.interests), false),
+            prompt: buildPrompt(this.scene, this.interests, false),
         };
     }
 
