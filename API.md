@@ -114,14 +114,17 @@ latency, because Qwen3-VL charges image tokens by area. Measured on this camera,
     896x504      468 tokens    447ms
     640x360      240 tokens    242ms
 
-1280x704 is the default. Change it from the page, or:
+1280x704 is the default. The page offers those four as buttons, labelled with the times above,
+because nothing between them is a distinction worth making and the time is what the choice is
+actually about. Over http:
 
-    GET  /resolution                      -> { width, height }
+    GET  /resolution                      -> { width, height, presets }
     POST /resolution {"width":896,"height":504}
 
-Each edge must be between 160 and 1920; above the camera own output there is nothing to gain. It
-takes effect on the very next frame, with no restart, which is the point: the right size is something
-you find by trying it against the actual room. It is not remembered across a restart.
+An api caller is not held to the presets, only to each edge being between 160 and 1920; above the
+camera own output there is nothing to gain. It takes effect on the very next frame, with no restart,
+which is the point: the right size is something you find by trying it against the actual room. It is
+not remembered across a restart.
 
 The same setting decides what /frames hands out, so a frame kept for review is the pixels the answer
 came from rather than a sharper version the model never saw.

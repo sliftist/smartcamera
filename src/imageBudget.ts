@@ -16,6 +16,21 @@
  * it against the actual room rather than by reasoning about it.
  */
 
+/**
+ * The sizes worth offering, with what a frame actually cost at each when they were measured.
+ *
+ * Four buttons rather than a box to type in. Nothing between these is a useful distinction: the
+ * numbers below are what the choice is really about, and picking 1180x640 over 1280x704 buys nothing
+ * anyone could perceive. The times are measured on this camera and this card, cold, and are here to
+ * be read rather than to be exact.
+ */
+export const PRESETS = [
+    { width: 1920, height: 1080, frameMs: 3235 },
+    { width: 1280, height: 704, frameMs: 996 },
+    { width: 896, height: 504, frameMs: 447 },
+    { width: 640, height: 360, frameMs: 242 },
+];
+
 export const MIN_EDGE = 160;
 /** Above the camera's own 1920x1080 there is nothing to gain: it would be upscaling its own output. */
 export const MAX_EDGE = 1920;

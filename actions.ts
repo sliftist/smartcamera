@@ -453,9 +453,10 @@ td { border-top: 1px solid var(--line); padding: 7px 6px; vertical-align: top; }
        padding: 2px 4px 2px 11px; margin-right: 6px; }
               font-size: 15px; line-height: 1; border-radius: 999px; }
 .pin button:hover { opacity: 1; }
-#pin, #secret, #res { display: inline-flex; gap: 6px; margin-bottom: 6px; }
-#res input { font: inherit; padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px;
-             background: none; color: inherit; min-width: 120px; }
+#pin, #secret { display: inline-flex; gap: 6px; margin-bottom: 6px; }
+#res { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
+#res button { opacity: .75; }
+#res button.picked { opacity: 1; border-color: #d9822b; color: #d9822b; font-weight: 600; }
 #resNote { margin-bottom: 16px; min-height: 1.2em; }
 #secret input { font: inherit; padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px;
                 background: none; color: inherit; min-width: 200px; }
@@ -481,7 +482,7 @@ tr.fresh { animation: in .35s ease-out; }
 <form id="secret"><input id="secretValue" type="text" placeholder="leave empty to remove" autocomplete="off" spellcheck="false"><button type="submit">set</button></form>
 <div id="secretNote" class="quiet"></div>
 <h2>resolution shown to the model</h2>
-<form id="res"><input id="resValue" placeholder="1280x704" autocomplete="off" spellcheck="false"><button type="submit">set</button></form>
+<div id="res"></div>
 <div id="resNote" class="quiet"></div>
 <h2>watched in every frame</h2>
 <div class="pins"><span id="interests"></span></div>
@@ -570,8 +571,11 @@ document.getElementById("secret").onsubmit = async event => {
 // A frame is downscaled to fit inside this before the model sees it, and the aspect ratio is kept,
 // so 1280x704 against a 1920x1080 camera actually sends 1252x704. Cost goes with area: measured on
 // this camera, 1280x704 is about 1s a frame and 1920x1080 about 3.2s.
+// A button per size rather than a box to type in. Nothing between these sizes is a distinction worth
+// making, and the times in brackets are what the choice is actually about.
 async function showResolution(budget) {
     const note = document.getElementById("resNote");
+    const holder = document.getElementById("res");
     if (!budget) {
         try {
             budget = await (await api("/resolution")).json();
@@ -584,29 +588,32 @@ async function showResolution(budget) {
         note.textContent = budget.error;
         return;
     }
-    document.getElementById("resValue").placeholder = budget.width + "x" + budget.height;
+    holder.replaceChildren();
+    for (const preset of budget.presets || []) {
+        const button = document.createElement("button");
+        button.type = "button";
+        const seconds = preset.frameMs >= 1000
+            ? (preset.frameMs / 1000).toFixed(1) + "s"
+            : preset.frameMs + "ms";
+        button.textContent = preset.width + "x" + preset.height + " (" + seconds + ")";
+        if (preset.width === budget.width && preset.height === budget.height) {
+            button.className = "picked";
+        }
+        button.onclick = async () => {
+            const reply = await (await api("/resolution", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ width: preset.width, height: preset.height }),
+            })).json();
+            await showResolution(reply);
+        };
+        holder.append(button);
+    }
     note.textContent = "frames are fitted inside " + budget.width + "x" + budget.height
-        + ", keeping the aspect ratio. smaller is faster, and costs detail.";
+        + ", keeping the aspect ratio, so the camera's 1920x1080 goes in a little narrower than that."
+        + " times are what a frame took when measured.";
     note.className = "quiet";
 }
-
-document.getElementById("res").onsubmit = async event => {
-    event.preventDefault();
-    const field = document.getElementById("resValue");
-    const note = document.getElementById("resNote");
-    const parts = /^\s*(\d+)\s*[x×,\s]\s*(\d+)\s*$/.exec(field.value);
-    if (!parts) {
-        note.textContent = "write it as width x height, e.g. 896x504";
-        return;
-    }
-    const reply = await (await api("/resolution", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ width: Number(parts[1]), height: Number(parts[2]) }),
-    })).json();
-    field.value = "";
-    await showResolution(reply);
-};
 
 async function showPasswordState() {
     try {

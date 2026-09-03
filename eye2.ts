@@ -10,7 +10,7 @@ import { AccessUnit, H264Depacketizer, isKeyframe, nalType, parseParameterSets, 
 import { decodeKeyframe, initializeDecoder, DecodedFrame } from "./src/decoder";
 import { StreamDecoder } from "./src/streamDecoder";
 import { resizeToFit, rotate180 } from "./src/overlay";
-import { imageBudget, setImageBudget } from "./src/imageBudget";
+import { imageBudget, setImageBudget, PRESETS } from "./src/imageBudget";
 import { AskBackend, createAskBackend } from "./src/askBackend";
 import { loadViews, View } from "./src/views";
 
@@ -624,14 +624,14 @@ async function main() {
                 // trying it against the actual room rather than by reasoning about it.
                 if (url.pathname === "/resolution") {
                     if (request.method !== "POST") {
-                        send(200, imageBudget());
+                        send(200, { ...imageBudget(), presets: PRESETS });
                         return;
                     }
                     const parameters = await readParameters(request, url);
                     try {
                         const budget = setImageBudget(Number(parameters.width), Number(parameters.height));
                         log(`the model is now shown frames that fit ${budget.width}x${budget.height}`);
-                        send(200, budget);
+                        send(200, { ...budget, presets: PRESETS });
                     } catch (error) {
                         send(400, { error: (error as Error).message });
                     }
