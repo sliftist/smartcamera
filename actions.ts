@@ -22,6 +22,8 @@ const RECENT_LIMIT = 500;
 /** What a joining page is shown before live rounds start arriving. */
 const BACKLOG_LIMIT = 200;
 const REQUEST_TIMEOUT_MS = 60_000;
+/** How long to wait after a round that produced nothing, so a broken model is not asked in a tight loop. */
+const FAILURE_BACKOFF_MS = 3_000;
 /**
  * Frames are held in memory for this long and never written down unless someone annotates one. The
  * point of the log is the text; keeping every frame at this rate would be gigabytes a day. Holding a
@@ -188,7 +190,8 @@ class Recorder {
         }
     }
 
-    async round() {
+    /** False when the round produced nothing, which is the caller's cue to back off rather than spin. */
+    async round(): Promise<boolean> {
         const prompt = buildPrompt(this.vocabulary);
         const at = Date.now();
         let reply: Record<string, unknown>;
@@ -203,12 +206,12 @@ class Recorder {
         } catch (error) {
             this.failures++;
             log(`asking failed: ${(error as Error).message}`);
-            return;
+            return false;
         }
         if (typeof reply.error === "string") {
             this.failures++;
             log(`eye2 refused: ${reply.error}`);
-            return;
+            return false;
         }
 
         const raw = String(reply.answer ?? "");
@@ -231,6 +234,7 @@ class Recorder {
 
         const shown = actions.map(action => added.includes(action) ? `NEW ${action}` : action);
         log(`${entry.outputTokens} out tok, ${entry.analyzeMs.toFixed(0)}ms | ${shown.join(" | ") || "(nothing)"}`);
+        return true;
     }
 
     get state() {
@@ -547,8 +551,13 @@ async function main() {
     log(`asking camera ${index} ${intervalSeconds > 0 ? `every ${intervalSeconds}s` : `back to back`}, keeping ${vocabularySize} lettered actions`);
     while (true) {
         const startedAtMs = Date.now();
-        await recorder.round();
-        const remainingMs = intervalSeconds * 1000 - (Date.now() - startedAtMs);
+        const answered = await recorder.round();
+        // A failed round returns in milliseconds, so with no interval set this loop would spin at the
+        // speed of the failure: thousands of requests and log lines a minute while the model is down,
+        // which is what it did while llama.cpp was wedged. Backing off keeps a broken model quiet and
+        // leaves the log readable enough to see why it broke.
+        const waitMs = answered ? intervalSeconds * 1000 : FAILURE_BACKOFF_MS;
+        const remainingMs = waitMs - (Date.now() - startedAtMs);
         if (remainingMs > 0) {
             await new Promise(resolve => setTimeout(resolve, remainingMs));
         }

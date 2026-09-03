@@ -18,6 +18,16 @@ const HEALTH_POLL_MS = 500;
 const REQUEST_TIMEOUT_MS = 30_000;
 /** Consecutive stuck requests before the server is presumed wedged and restarted out from under itself. */
 const FAILURES_BEFORE_RESTART = 2;
+/**
+ * How long a polite kill is given before it stops being polite.
+ *
+ * llama.cpp installs a SIGTERM handler and shuts down gracefully, which is exactly what it cannot do
+ * in the state we need to kill it in: the hang is a worker thread parked in the amd driver waiting on
+ * a gpu event that never arrives, so the orderly shutdown blocks on the same thread the signal was
+ * sent to escape. Seen in practice as a server that kept answering /health, ignored SIGTERM, and left
+ * this client permanently convinced the model was "still loading".
+ */
+const KILL_GRACE_MS = 5_000;
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.SMARTCAMERA_LLAMA_PORT || 8771);
 /**
@@ -263,7 +273,7 @@ export class LlamaAskClient {
                 this.onLog(`[model] ${this.consecutiveFailures} requests in a row went nowhere, restarting the server`);
                 this.consecutiveFailures = 0;
                 this.ready = false;
-                this.child?.kill();
+                this.killChild();
             }
             throw error;
         } finally {
@@ -271,8 +281,23 @@ export class LlamaAskClient {
         }
     }
 
+    /** Asks it to go, then makes it go. See KILL_GRACE_MS for why asking is not enough. */
+    private killChild() {
+        const child = this.child;
+        if (!child) {
+            return;
+        }
+        child.kill("SIGTERM");
+        setTimeout(() => {
+            if (child.exitCode === null && child.signalCode === null) {
+                this.onLog(`[model] it did not stop when asked, killing it`);
+                child.kill("SIGKILL");
+            }
+        }, KILL_GRACE_MS).unref();
+    }
+
     stop() {
         this.stopped = true;
-        this.child?.kill();
+        this.killChild();
     }
 }
