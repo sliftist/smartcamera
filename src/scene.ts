@@ -29,7 +29,7 @@ const MAX_WORDS = 6;
  * deletion. That is not hypothetical: with a dash it emptied the scene every second round and spent
  * its time describing the same room over and over.
  */
-const REMOVAL = /^(gone|no longer|removed|left)\s*:?\s+/i;
+const REMOVAL = /^(remove|removed|gone|no longer|left)\s*:?\s+/i;
 /**
  * Stripped off the front of an item before anything else. Bullets and numbers included, so that an
  * answer which just echoes the list back lands on the items already in the scene and changes nothing,
@@ -69,14 +69,18 @@ export function buildPrompt(offered: string[], full: boolean): string {
     // Pinned phrases sit in this list exactly like anything else, with no marking to say they are
     // different. That is what makes the model keep the caller's wording: it is being shown the phrase
     // as something already true of the scene, so confirming it costs nothing and rewording it does.
+    // Plain lines, no numbers and no bullets. A numbered list gets answered by number, and a position
+    // is a worse thing to be handed than the text: it means nothing on its own, it has to be resolved
+    // against exactly the list that was sent, and getting that resolution wrong silently deletes the
+    // wrong item. The text says what it means and matches whatever it matches.
     return [
         `A moment ago this scene held:`,
-        ...offered.map((item, index) => `${index + 1}. ${item}`),
+        ...offered,
         ``,
         `Look at the image now and report only what has changed.`,
         `Write anything new as a short phrase of at most ${MAX_WORDS} words.`,
-        `Write "gone: " before anything numbered above that is no longer true.`,
-        `Do not repeat anything numbered above that is still true.`,
+        `Put remove in front of anything above that is no longer true.`,
+        `Do not repeat anything above that is still true.`,
         `If nothing has changed, write: nothing`,
         ``,
         `Write everything on one line separated by | and write nothing else.`,
@@ -86,16 +90,56 @@ export function buildPrompt(offered: string[], full: boolean): string {
 /** Lowercase and stripped of list punctuation, so the same phrase twice is one entry. */
 const normalize = normalizePhrase;
 
+/** Words that carry no meaning on their own, so they should not make two phrases look alike. */
+const NOISE_WORDS = new Set(["a", "an", "the", "of", "on", "in", "at", "to", "is", "are", "with", "and", "his", "her", "their"]);
+
+function meaningfulWords(phrase: string): Set<string> {
+    return new Set(phrase.split(/[^a-z0-9]+/).filter(word => word && !NOISE_WORDS.has(word)));
+}
+
 /**
- * Matched loosely. The model rarely quotes a removal back word for word, and refusing to drop
- * something because the wording drifted is how a scene fills up with things that left.
+ * Matched loosely, and it has to be: the text is the only handle on an item now, and the model rarely
+ * quotes one back word for word. It says "remove the green cup" for "green cup on desk".
+ *
+ * Loose has a floor though. Two meaningful words have to line up, so "hand on mouse" does not answer
+ * for "hand on keyboard" on the strength of the word hand, and an ambiguous best match removes
+ * nothing rather than guessing, since a wrong removal deletes something that is really there.
  */
 function findByText(item: string, state: string[]): string | undefined {
     const exact = state.find(candidate => candidate === item);
     if (exact) {
         return exact;
     }
-    return state.find(candidate => candidate.includes(item) || item.includes(candidate));
+    // One containment is a match; two is a question. "remove hand" sits inside both "hand on mouse"
+    // and "hand on keyboard", and picking whichever came first would be a coin toss over which real
+    // thing to delete.
+    const contained = state.filter(candidate => candidate.includes(item) || item.includes(candidate));
+    if (contained.length === 1) {
+        return contained[0];
+    }
+    if (contained.length > 1) {
+        return undefined;
+    }
+    const wanted = meaningfulWords(item);
+    let best: string | undefined;
+    let bestScore = 1;
+    let tied = false;
+    for (const candidate of state) {
+        let score = 0;
+        for (const word of meaningfulWords(candidate)) {
+            if (wanted.has(word)) {
+                score++;
+            }
+        }
+        if (score > bestScore) {
+            best = candidate;
+            bestScore = score;
+            tied = false;
+        } else if (score === bestScore && best) {
+            tied = true;
+        }
+    }
+    return tied ? undefined : best;
 }
 
 /** The scene as it stands once the model's reply has been applied to what it was shown. */
@@ -109,17 +153,8 @@ export function parseRound(reply: string, offered: string[], full: boolean): str
             continue;
         }
         if (!full && REMOVAL.test(trimmed)) {
-            // Normalizing would eat a bare list number, since a leading digit is one of the bullet
-            // shapes stripped off items, so a position is recognised before that runs.
-            const target = trimmed.replace(REMOVAL, "").trim();
-            const position = /^(\d+)\.?$/.exec(target);
-            // A position numbers the list the model was shown, which does not renumber as items are
-            // dropped from it. Resolving against the list being built instead shifts every index after
-            // the first removal: "gone: 4|gone: 5" took out the fourth and then the sixth item, so the
-            // scene lost things that were there and kept things that were not.
-            const match = position
-                ? offered[Number(position[1]) - 1]
-                : findByText(normalize(target), next);
+            const item = normalize(trimmed.replace(REMOVAL, ""));
+            const match = item && findByText(item, next);
             if (match) {
                 next = next.filter(candidate => candidate !== match);
             }
