@@ -5,14 +5,14 @@
  * versions this targets, so the same file runs unbundled in a page and unmodified under Node.
  *
  * What it is for is watching whether something is happening. The service answers a fixed set of
- * questions about every frame; a caller here names one and gets told when the answer turns yes and
- * when it turns no. Everything else, the connection, the reconnection, and making sure the question
+ * phrases about every frame; a caller here names one and gets told when the answer turns yes and
+ * when it turns no. Everything else, the connection, the reconnection, and making sure the phrase
  * is actually being asked, is this file's problem rather than the caller's.
  */
 
 export type EyeEntry = {
     at: number;
-    /** The questions answered yes this round. */
+    /** The phrases answered yes this round. */
     state: string[];
     added: string[];
     removed: string[];
@@ -31,7 +31,7 @@ export type EyeState = {
     failures: number;
     buffered: number;
     bufferSeconds: number;
-    questions: string[];
+    phrases: string[];
     yes: string[];
     prompt: string;
 };
@@ -59,7 +59,7 @@ const DEFAULT_RECONNECT_MS = 1000;
 const MAX_RECONNECT_MS = 60_000;
 
 type Watch = {
-    question: string;
+    phrase: string;
     handlers: WatchHandlers;
 };
 
@@ -79,17 +79,23 @@ export class EyeClient {
     }
 
     /**
-     * Watch a question, and be told when it starts and stops being true.
+     * Watch a phrase, and be told when it starts and stops being true.
      *
-     * The question is registered with the service if it is not already being asked, so a caller does
+     * The phrase is registered with the service if it is not already being asked, so a caller does
      * not have to configure anything first, and it is registered again after a reconnect. That is not
-     * belt and braces: the service can be restarted, or its questions edited by someone at the page,
+     * belt and braces: the service can be restarted, or its phrases edited by someone at the page,
      * and a watch that quietly stopped being asked would look exactly like a thing that never happens.
+     *
+     * A phrase needs the word the model answers with in parentheses, unless it is one of the service
+     * defaults. The service is what decides that, not this: it owns the list and the defaults, and a
+     * second copy of the rule here would be one that could disagree with it. A refusal comes back
+     * through onError, since a watch that was never registered fires nothing, which is otherwise
+     * indistinguishable from a thing that simply never happens.
      */
-    watch(question: string, handlers: WatchHandlers): () => void {
-        const watch: Watch = { question, handlers };
+    watch(phrase: string, handlers: WatchHandlers): () => void {
+        const watch: Watch = { phrase, handlers };
         this.watches.add(watch);
-        void this.ensureQuestions();
+        void this.ensurePhrases();
         return () => {
             this.watches.delete(watch);
         };
@@ -122,9 +128,9 @@ export class EyeClient {
         return this.options.password ? `${base}/?password=${encodeURIComponent(this.options.password)}` : base;
     }
 
-    /** Adds any watched question the service is not currently asking. */
-    private async ensureQuestions() {
-        const wanted = [...new Set([...this.watches].map(watch => watch.question))];
+    /** Adds any watched phrase the service is not currently asking. */
+    private async ensurePhrases() {
+        const wanted = [...new Set([...this.watches].map(watch => watch.phrase))];
         if (wanted.length === 0) {
             return;
         }
@@ -133,14 +139,21 @@ export class EyeClient {
             if (!response.ok) {
                 throw new Error(`the service answered ${response.status}`);
             }
-            const asked = ((await response.json()) as { questions?: string[] }).questions ?? [];
-            for (const question of wanted) {
-                if (!asked.includes(question)) {
-                    await fetch(`${this.options.url.replace(/\/+$/, "")}/questions`, {
-                        method: "POST",
-                        headers: this.headers(),
-                        body: JSON.stringify({ question }),
-                    });
+            const asked = ((await response.json()) as { phrases?: string[] }).phrases ?? [];
+            for (const phrase of wanted) {
+                if (asked.includes(phrase)) {
+                    continue;
+                }
+                const added = await fetch(`${this.options.url.replace(/\/+$/, "")}/questions`, {
+                    method: "POST",
+                    headers: this.headers(),
+                    body: JSON.stringify({ phrase }),
+                });
+                // Usually a phrase with no word in parentheses. Reported rather than swallowed: it is
+                // not being asked, so its handlers will never fire and nothing else would say why.
+                if (!added.ok) {
+                    const refusal = ((await added.json().catch(() => ({}))) as { error?: string }).error;
+                    this.options.onError?.(new Error(refusal ?? `the service answered ${added.status}`));
                 }
             }
         } catch (error) {
@@ -166,7 +179,7 @@ export class EyeClient {
             this.connected = true;
             this.reconnectMs = this.options.reconnectMs ?? DEFAULT_RECONNECT_MS;
             this.options.onConnectionChange?.(true);
-            void this.ensureQuestions();
+            void this.ensurePhrases();
         };
         socket.onmessage = event => {
             try {
@@ -205,8 +218,8 @@ export class EyeClient {
 
     private receive(message: { type?: string; entry?: EyeEntry; entries?: EyeEntry[]; state?: EyeState }) {
         if (message.type === "state") {
-            // The questions changed under us, possibly losing one a watch depends on.
-            void this.ensureQuestions();
+            // The phrases changed under us, possibly losing one a watch depends on.
+            void this.ensurePhrases();
             return;
         }
         if (message.type === "init") {
@@ -221,8 +234,8 @@ export class EyeClient {
         const entry = message.entry;
         const now = new Set(entry.state);
         for (const watch of [...this.watches]) {
-            const was = this.yes.has(watch.question);
-            const is = now.has(watch.question);
+            const was = this.yes.has(watch.phrase);
+            const is = now.has(watch.phrase);
             if (is && !was) {
                 this.safely(() => watch.handlers.onStart?.(entry));
             } else if (was && !is) {

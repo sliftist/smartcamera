@@ -14,30 +14,48 @@ same twice, and it periodically deleted its own description and started over.
 Closed questions do not have that problem. An answer means the same thing today as it did an hour
 ago, a change is a flip rather than a rewording, and the reply is a few tokens no matter how much is
 going on in the room. The thing you configured is also exactly the thing that comes back out, since
-an answer is reported as the question you typed rather than as the word the model said.
+an answer is reported as the phrase you typed rather than as the word the model said.
 
-    GET    /questions                                          -> { watches, questions, defaults }
-    POST   /questions {"question":"...","keyword":"phone"}       add, or rename an existing keyword
-    DELETE /questions?question=...                             remove
+    GET    /questions                                        -> { watches, phrases, defaults }
+    POST   /questions {"phrase":"is eating pizza (pizza)"}     add
+    DELETE /questions?phrase=...                              remove
 
-Every watch is a question and a single word. The word is what the model answers with, and it is the
-caller's to choose. It can be left out: a built in question is looked up, so an older caller naming
-one needs to know nothing about keywords, and anything else gets a word derived from its own.
+A phrase carries its own word, in parentheses at the end:
 
-The defaults, always asked and needing no registration. They cannot be removed: a DELETE naming one
-is accepted and changes nothing, and the page shows them filled in with no cross. Removing one could
-only mean it disappears until the next restart, which is worse than not being able to.
+    is eating pizza (pizza)
 
-    person      is a person present
-    drinking    is anyone drinking
-    mouse       is a hand on the mouse
-    typing      is anyone typing
-    eating      is anyone eating
-    headphones  is anyone wearing headphones
-    shirt       is wearing shirt
-    door        is the door open
-    lit         is well lit
-    tilted      head tilted back with hands on face
+The word is what the model answers with, and choosing it is the caller's job, because the caller is
+the one who finds out it was the wrong word. One string rather than a question and a keyword side by
+side: the word has to be visible wherever the phrase is, so keeping it inside means every place that
+shows a phrase already shows it, and there is one identity to pass around instead of a pair to keep
+together. That whole string is what an entry, a log line and a stat all report.
+
+A phrase arriving without a word is refused, unless it is one of the defaults below. Deriving one
+from the question was the first attempt and it is quietly worse: the caller never agreed to the word,
+cannot see it without asking, and finds out it clashed with another phrase only by getting answers
+meant for that one. Two phrases answering to the same word is refused for the same reason.
+
+The service is the only thing that ever takes a phrase apart, and it does it when one is added, which
+is the last moment that is any use: the caller is still on the other end of a request and can be told
+no. The client sends a string and reads a string back, so there is no second copy of the rule to
+disagree, and no way to be refused by a version of it the service is not running.
+
+The defaults, always asked and needing no registration. Each can also be named without its
+parentheses, which is what lets anything that already watched one keep working untouched. They cannot
+be removed: a DELETE naming one is accepted and changes nothing, and the page shows them filled in
+with no cross. Removing one could only mean it disappears until the next restart, which is worse than
+not being able to.
+
+    is a person present (person)
+    is anyone drinking (drinking)
+    is a hand on the mouse (mouse)
+    is anyone typing (typing)
+    is anyone eating (eating)
+    is anyone wearing headphones (headphones)
+    is wearing shirt (shirt)
+    is the door open (door)
+    is well lit (lit)
+    head tilted back with hands on face (tilted)
 
 The answer is the words of the true ones and nothing else, so anything left out is a no. A still room
 costs about five output tokens rather than one per question, and generating was a third of a frame's
@@ -59,7 +77,7 @@ A websocket on the same port and path as the page. Three message shapes, all JSO
     const socket = new WebSocket("ws://10.0.0.200:8772");
     socket.onmessage = event => {
         const message = JSON.parse(event.data);
-        if (message.type === "entry" && message.entry.added.includes("is anyone drinking")) {
+        if (message.type === "entry" && message.entry.added.includes("is anyone drinking (drinking)")) {
             // it just started
         }
     };
@@ -69,9 +87,9 @@ An entry:
 | field | meaning |
 | --- | --- |
 | `at` | epoch milliseconds |
-| `state` | the questions answered yes |
+| `state` | the phrases answered yes |
 | `added`, `removed` | which answers flipped since the round before |
-| `unanswered` | questions the model did not answer, which are neither yes nor no |
+| `unanswered` | phrases the model did not answer, which are neither yes nor no |
 | `raw` | what the model literally replied |
 | `promptTokens`, `outputTokens` | what it cost |
 | `decodeMs`, `prefillMs`, `generateMs`, `analyzeMs` | where the time went |
@@ -85,9 +103,14 @@ listed in `unanswered` so a caller can tell the difference between "no" and "did
 One file a day under `actions/`, holding only what cannot be worked out again. Each file opens with
 the state the day began in and everything after it is a change:
 
-    {"at":1788408519000,"state":["is a person present","is anyone typing"]}
-    {"at":1788408521269,"removed":["is a hand on the mouse"]}
-    {"at":1788408533419,"added":["is anyone typing"]}
+    {"at":1788408519000,"state":["is a person present (person)","is anyone typing (typing)"]}
+    {"at":1788408521269,"removed":["is a hand on the mouse (mouse)"]}
+    {"at":1788408533419,"added":["is anyone typing (typing)"]}
+
+Lines written before the word moved into the phrase say "is a person present" where these say "is a
+person present (person)". Both are read as the same thing, so a stat covering the change is not split
+down the middle by it. Only the defaults can be recovered that way, which is nearly all of what is
+in there.
 
 A round where nothing flipped writes nothing at all, which is most of them. Times are plain
 milliseconds since the epoch. Timings and token counts are not written: they describe the run rather
@@ -192,11 +215,16 @@ refused.
     unwatch();
     client.close();
 
-`watch` registers the question with the service if it is not already being asked, so a caller names
-what it cares about and configures nothing. It registers it again after a reconnect, and again if the
-questions change underneath it. That is not belt and braces: the service can be restarted, or its
-questions edited by someone at the page, and a watch whose question had quietly stopped being asked
-would look exactly like a thing that never happens.
+`watch` registers the phrase with the service if it is not already being asked, so a caller names what
+it cares about and configures nothing. It registers it again after a reconnect, and again if the
+phrases change underneath it. That is not belt and braces: the service can be restarted, or its
+phrases edited by someone at the page, and a watch whose phrase had quietly stopped being asked would
+look exactly like a thing that never happens.
+
+The client passes the phrase through as a string and never looks inside it. Deciding whether a phrase
+is acceptable is the service's job, since the service owns the list and the defaults, and a copy of
+that rule here would be one that could disagree with the version actually running. A refusal, which
+is nearly always a phrase with no word in parentheses, comes back through `onError`.
 
 Reconnection is automatic, backing off from a second to a minute, because a service that is down is
 usually down for more than a second and a client retrying every second forever is hard to tell from

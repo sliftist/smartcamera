@@ -1,4 +1,4 @@
-import { buildPrompt, parseAnswers, diffAnswers, deriveKeyword, defaultKeywordFor, normalizeKeyword, DEFAULT_WATCHES, Watch } from "../src/questions";
+import { buildPrompt, parseAnswers, diffAnswers, parseWatch, canonicalPhrase, normalizeKeyword, DEFAULT_WATCHES, Watch } from "../src/questions";
 
 let failures = 0;
 
@@ -14,61 +14,87 @@ function check(label: string, got: unknown, want: unknown) {
     }
 }
 
+function refuses(label: string, run: () => unknown) {
+    try {
+        run();
+        failures++;
+        console.log(`  FAIL ${label}`);
+        console.log(`         it was accepted`);
+    } catch {
+        console.log(`  ok   ${label}`);
+    }
+}
+
 const watches: Watch[] = [
-    { keyword: "person", question: "is a person present" },
-    { keyword: "drinking", question: "is anyone drinking" },
-    { keyword: "mouse", question: "is a hand on the mouse" },
-];
-const yesOf = (reply: string) => parseAnswers(reply, watches).yes;
+    "is a person present (person)",
+    "is anyone drinking (drinking)",
+    "is a hand on the mouse (mouse)",
+    "is anyone typing (typing)",
+].map(parseWatch);
+const phrases = watches.map(watch => watch.phrase);
 
-console.log(`reading the words back:`);
-check("two of them", yesOf("person mouse"), ["is a person present", "is a hand on the mouse"]);
-check("one", yesOf("drinking"), ["is anyone drinking"]);
-check("in the order asked, not the order said", yesOf("mouse person"),
-    ["is a person present", "is a hand on the mouse"]);
-check("commas and newlines", yesOf("person,\nmouse"), ["is a person present", "is a hand on the mouse"]);
-check("case does not matter", yesOf("PERSON Mouse"), ["is a person present", "is a hand on the mouse"]);
-check("none is a word", yesOf("none"), []);
-check("and none means everything was decided", parseAnswers("none", watches).answered,
-    watches.map(watch => watch.question));
-check("naming some means the rest are no", parseAnswers("person", watches).answered,
-    watches.map(watch => watch.question));
+console.log(`parsing a phrase`);
+check("splits on the trailing parentheses", parseWatch("is eating pizza (pizza)"),
+    { phrase: "is eating pizza (pizza)", question: "is eating pizza", keyword: "pizza" });
+check("tidies the spacing on the way in", parseWatch("  is   eating pizza  (  Pizza )  ").phrase,
+    "is eating pizza (pizza)");
+check("a keyword is one lowercase word", normalizeKeyword("  Hot-Dog!  "), "hotdog");
+check("a default needs no parentheses", parseWatch("is anyone drinking").phrase,
+    "is anyone drinking (drinking)");
+check("and keeps its own word", parseWatch("is anyone drinking").keyword, "drinking");
+// The whole point of the change: nothing gets a word it never agreed to.
+refuses("anything else without a word is refused", () => parseWatch("is the kettle on"));
+refuses("so is an empty word", () => parseWatch("is the kettle on ()"));
+refuses("so is a word with no question", () => parseWatch("(kettle)"));
+refuses("so is nothing at all", () => parseWatch("   "));
+refuses("so is a phrase past the length limit", () => parseWatch(`${"x".repeat(200)} (long)`));
+check("every default carries its own word", DEFAULT_WATCHES.every(watch => watch.keyword.length > 0), true);
+check("and no two share one", new Set(DEFAULT_WATCHES.map(watch => watch.keyword)).size, DEFAULT_WATCHES.length);
 
-// A stray word is the model saying what it thinks it sees. Kept, because it is information.
-console.log(`\nwords that were never offered:`);
-check("kept alongside the real ones", parseAnswers("person phone", watches).unknown, ["phone"]);
-check("without disturbing the answer", parseAnswers("person phone", watches).yes, ["is a person present"]);
-check("nothing recognised at all is not an answer", parseAnswers("I cannot tell", watches).answered, []);
-check("but is still reported", parseAnswers("a cat", watches).unknown, ["a", "cat"]);
-check("an empty reply says nothing", parseAnswers("", watches), { yes: [], answered: [], unknown: [] });
-
-console.log(`\nkeywords:`);
-check("a built in question knows its own", defaultKeywordFor("is anyone drinking"), "drinking");
-check("and an unknown one does not", defaultKeywordFor("is the kettle on"), undefined);
-check("derived from the meaningful end", deriveKeyword("is anyone holding a phone", []), "phone");
-check("skipping the filler words", deriveKeyword("is there a person at the door", []), "door");
-// Two questions sharing a word would make an answer ambiguous about which one it meant. Another word
-// from the same question is tried before a digit is resorted to.
-check("a clash takes another word from the question", deriveKeyword("is the door open", ["door"]), "open");
-check("and only then a digit", deriveKeyword("is the door open", ["door", "open"]), "open2");
-check("keywords are one lowercase word", normalizeKeyword("  Hand-On Mouse! "), "handonmouse");
-
-console.log(`\nchange is a flip, computed here:`);
-check("turning on", diffAnswers([], ["is anyone drinking"]), { added: ["is anyone drinking"], removed: [] });
-check("turning off", diffAnswers(["is anyone drinking"], []), { added: [], removed: ["is anyone drinking"] });
-check("staying on", diffAnswers(["is anyone drinking"], ["is anyone drinking"]), { added: [], removed: [] });
-
-console.log(`\nthe prompt:`);
+console.log(`the prompt`);
 const prompt = buildPrompt(watches);
-check("pairs each word with its question", prompt.includes("drinking: is anyone drinking"), true);
-check("asks for only the true words", prompt.includes("only the words of the ones that are true"), true);
-check("with none as the empty answer", prompt.includes("Write none if none of them are true"), true);
-check("and never asks for yes or no", /\byes\b/.test(prompt), false);
+check("maps each word to its question", prompt.includes("mouse: is a hand on the mouse"), true);
+check("shows the parentheses to nobody", prompt.includes("("), false);
+check("asks for words only", prompt.includes("Write only the words of the ones that are true"), true);
+check("gives an example from the list", prompt.includes("Like this: person drinking"), true);
 
-console.log(`\nthe defaults:`);
-check("every one has a keyword", DEFAULT_WATCHES.every(watch => watch.keyword.length > 0), true);
-check("and no two share one",
-    new Set(DEFAULT_WATCHES.map(watch => watch.keyword)).size, DEFAULT_WATCHES.length);
+console.log(`reading a reply`);
+check("the words it said are true", parseAnswers("person typing", watches).yes,
+    ["is a person present (person)", "is anyone typing (typing)"]);
+check("and everything is decided", parseAnswers("person typing", watches).answered, phrases);
+check("reported in the order asked", parseAnswers("typing person", watches).yes,
+    ["is a person present (person)", "is anyone typing (typing)"]);
+check("none means nothing is true", parseAnswers("none", watches).yes, []);
+check("but everything was still decided", parseAnswers("none", watches).answered, phrases);
+check("a repeat is not counted twice", parseAnswers("person person", watches).yes,
+    ["is a person present (person)"]);
+check("commas and newlines are separators too", parseAnswers("person,\ntyping", watches).yes,
+    ["is a person present (person)", "is anyone typing (typing)"]);
+check("case is ignored", parseAnswers("Person TYPING", watches).yes,
+    ["is a person present (person)", "is anyone typing (typing)"]);
 
-console.log(failures === 0 ? `\nall passed` : `\n${failures} failed`);
+console.log(`words that were never offered`);
+check("are kept", parseAnswers("person phone", watches).unknown, ["phone"]);
+check("without losing the ones that were", parseAnswers("person phone", watches).yes,
+    ["is a person present (person)"]);
+check("and are not repeated", parseAnswers("phone phone person", watches).unknown, ["phone"]);
+// A reply about something else entirely, rather than an answer that everything is false. Saying
+// nothing is true would report every watch as having stopped.
+check("a reply with nothing recognisable answers nothing", parseAnswers("I cannot see the image", watches).answered, []);
+check("and is still reported", parseAnswers("I cannot see the image", watches).unknown.includes("image"), true);
+check("an empty reply answers nothing", parseAnswers("", watches).answered, []);
+
+console.log(`what changed`);
+check("added", diffAnswers(["a"], ["a", "b"]).added, ["b"]);
+check("removed", diffAnswers(["a", "b"], ["b"]).removed, ["a"]);
+check("nothing", diffAnswers(["a"], ["a"]), { added: [], removed: [] });
+
+console.log(`old log lines`);
+// The day files straddle the change, so a week of history says it both ways.
+check("a bare default becomes its phrase", canonicalPhrase("is a person present"), "is a person present (person)");
+check("one that already has its word is left alone", canonicalPhrase("is a person present (person)"),
+    "is a person present (person)");
+check("and anything else is left as written", canonicalPhrase("is the kettle on"), "is the kettle on");
+
+console.log(failures === 0 ? `\nall good` : `\n${failures} failed`);
 process.exit(failures === 0 ? 0 : 1);

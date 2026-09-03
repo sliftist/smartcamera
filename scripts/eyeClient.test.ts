@@ -2,13 +2,13 @@ import { EyeClient } from "../src/eyeClient";
 
 /**
  * Drives the real service rather than a mock, because everything worth testing here is about how it
- * behaves against the real one: whether the questions it needs get registered, whether it reconnects,
+ * behaves against the real one: whether the phrases it needs get registered, whether it reconnects,
  * and whether a password is actually enforced.
  */
 
 const URL_BASE = process.env.EYE_URL || "http://127.0.0.1:8772";
 const PASSWORD = process.env.EYE_PASSWORD || "";
-const WATCHED = "is there a test question in the scene";
+const WATCHED = "is there a test question in the scene (testquestion)";
 
 let failures = 0;
 
@@ -25,9 +25,9 @@ function headers(): Record<string, string> {
         : { "Content-Type": "application/json" };
 }
 
-async function questions(): Promise<string[]> {
+async function phrases(): Promise<string[]> {
     const response = await fetch(`${URL_BASE}/questions`, { headers: headers() });
-    return ((await response.json()) as { questions?: string[] }).questions ?? [];
+    return ((await response.json()) as { phrases?: string[] }).phrases ?? [];
 }
 
 /** Polls an ordinary or async condition until it holds, or gives up. */
@@ -49,9 +49,9 @@ async function main() {
     check("this runtime has the globals the client needs",
         typeof WebSocket !== "undefined" && typeof fetch !== "undefined");
 
-    await fetch(`${URL_BASE}/questions?question=${encodeURIComponent(WATCHED)}`,
+    await fetch(`${URL_BASE}/questions?phrase=${encodeURIComponent(WATCHED)}`,
         { method: "DELETE", headers: headers() });
-    check("the watched question is not being asked yet", !(await questions()).includes(WATCHED));
+    check("the watched phrase is not being asked yet", !(await phrases()).includes(WATCHED));
 
     let connected = false;
     const errors: string[] = [];
@@ -73,13 +73,13 @@ async function main() {
 
     // The point of the registration: a caller names a question and does not have to configure it.
     check("watching registers the question with the service",
-        await waitFor(async () => (await questions()).includes(WATCHED), 8000));
+        await waitFor(async () => (await phrases()).includes(WATCHED), 8000));
 
     // And the recovery: someone removes it at the page, or the service restarts with an older file.
-    await fetch(`${URL_BASE}/questions?question=${encodeURIComponent(WATCHED)}`,
+    await fetch(`${URL_BASE}/questions?phrase=${encodeURIComponent(WATCHED)}`,
         { method: "DELETE", headers: headers() });
     check("it is put back after being removed underneath us",
-        await waitFor(async () => (await questions()).includes(WATCHED), 8000));
+        await waitFor(async () => (await phrases()).includes(WATCHED), 8000));
 
     check("no start or stop fired for a question nobody answered yes", started === 0 && stopped === 0,
         `started ${started}, stopped ${stopped}`);
@@ -88,7 +88,7 @@ async function main() {
     check("unwatching leaves the client running", true);
 
     client.close();
-    await fetch(`${URL_BASE}/questions?question=${encodeURIComponent(WATCHED)}`,
+    await fetch(`${URL_BASE}/questions?phrase=${encodeURIComponent(WATCHED)}`,
         { method: "DELETE", headers: headers() });
 
     console.log(failures === 0 ? `\nall passed` : `\n${failures} failed`);

@@ -4,7 +4,7 @@ import * as path from "path";
 import { formatDateTime } from "socket-function/src/formatting/format";
 import { pausePlayingMedia, resumeMedia } from "./src/media";
 import { EyeClient } from "./src/eyeClient";
-import { HEADPHONES_QUESTION } from "./src/questions";
+import { HEADPHONES_PHRASE } from "./src/questions";
 
 /**
  * Pauses whatever is playing when the headphones come off, and resumes when they go back on.
@@ -21,7 +21,7 @@ import { HEADPHONES_QUESTION } from "./src/questions";
  * "is anyone wearing headphones", so every frame answered the same thing twice, forever, for nothing.
  * Naming the default means the client registers nothing at all.
  */
-const PHRASE = HEADPHONES_QUESTION;
+const PHRASE = HEADPHONES_PHRASE;
 /**
  * Where the password is expected. A fixed path in the home folder, matching facehuggingtoken.txt
  * beside it, so nothing has to be passed on a command line or baked into a service file.

@@ -4,7 +4,7 @@ import * as path from "path";
 import { WebSocketServer, WebSocket } from "ws";
 import { formatDateTime } from "socket-function/src/formatting/format";
 import { dayStamp, millisecondStamp } from "./src/timestamps";
-import { buildPrompt, parseAnswers, diffAnswers, normalizeQuestion, normalizeKeyword, deriveKeyword, defaultKeywordFor, DEFAULT_WATCHES, MAX_QUESTIONS, MAX_QUESTION_LENGTH, MAX_KEYWORD_LENGTH, Watch } from "./src/questions";
+import { buildPrompt, parseAnswers, diffAnswers, parseWatch, canonicalPhrase, DEFAULT_WATCHES, MAX_QUESTIONS, MAX_PHRASE_LENGTH, Watch } from "./src/questions";
 import { readPassword, writePassword, passwordMatches, offeredPassword } from "./src/password";
 import { isLocalAddress } from "./src/network";
 import { readHistory, summarise } from "./src/history";
@@ -146,95 +146,73 @@ class Recorder {
         log(`asking the ${this.watches.length} default questions; anything else is added by whoever wants it`);
     }
 
-    private get questions(): string[] {
-        return this.watches.map(watch => watch.question);
+    private get phrases(): string[] {
+        return this.watches.map(watch => watch.phrase);
     }
 
     listWatches(): Watch[] {
         return this.watches.map(watch => ({ ...watch }));
     }
 
-    listQuestions(): string[] {
-        return this.questions;
+    listPhrases(): string[] {
+        return this.phrases;
     }
 
     /**
      * Returns the list as it now stands, so a caller sees the result of its own call.
      *
-     * The keyword is what the model answers with and is a caller's to choose. It can be left out:
-     * a built in question is looked up, so an older caller naming one needs to know nothing about
-     * keywords at all, and anything else gets one derived from its own words.
+     * The phrase carries the word the model answers with, in parentheses. A phrase without one is
+     * refused unless it is a default, which is what lets an older caller keep naming a built in
+     * question and know nothing about words at all.
+     *
+     * This is the only place a phrase is taken apart, and it is the last moment that is any use: a
+     * caller adding one is still on the other end of a request and can be told it was refused. The
+     * client sends a string and reads a string back, so there is no second copy of this rule to
+     * disagree with this one, and no way to be refused by a version of it the service is not running.
      */
-    addQuestion(question: string, keyword?: string): Watch[] {
-        const item = normalizeQuestion(question);
-        if (!item) {
-            throw new Error(`A question is required`);
-        }
-        if (item.length > MAX_QUESTION_LENGTH) {
-            throw new Error(`A question must be at most ${MAX_QUESTION_LENGTH} characters`);
-        }
-        const existing = this.watches.find(watch => watch.question === item);
-        if (existing) {
+    addWatch(phrase: string): Watch[] {
+        const watch = parseWatch(phrase);
+        if (this.watches.some(candidate => candidate.phrase === watch.phrase)) {
             return this.listWatches();
         }
         if (this.watches.length >= MAX_QUESTIONS) {
-            throw new Error(`At most ${MAX_QUESTIONS} questions can be asked at once`);
+            throw new Error(`At most ${MAX_QUESTIONS} phrases can be watched at once`);
         }
-        const taken = this.watches.map(watch => watch.keyword);
-        let word = normalizeKeyword(keyword ?? "");
-        if (word.length > MAX_KEYWORD_LENGTH) {
-            throw new Error(`A keyword must be at most ${MAX_KEYWORD_LENGTH} characters`);
+        // Two phrases answering to one word makes every answer ambiguous, and the model has no way to
+        // tell you which it meant, so this is refused rather than resolved.
+        const clash = this.watches.find(candidate => candidate.keyword === watch.keyword);
+        if (clash) {
+            throw new Error(`The word ${JSON.stringify(watch.keyword)} is already answering for`
+                + ` ${JSON.stringify(clash.phrase)}`);
         }
-        if (word && taken.includes(word)) {
-            throw new Error(`The keyword ${JSON.stringify(word)} is already used by another question`);
-        }
-        if (!word) {
-            word = defaultKeywordFor(item) ?? deriveKeyword(item, taken);
-        }
-        this.watches.push({ question: item, keyword: word });
+        this.watches.push(watch);
         this.questionsChanged();
-        log(`now asking ${JSON.stringify(item)} as ${JSON.stringify(word)}`);
+        log(`now asking ${JSON.stringify(watch.phrase)}`);
         return this.listWatches();
     }
 
-    removeQuestion(question: string): Watch[] {
-        const item = normalizeQuestion(question);
+    /**
+     * Removal is a string match and nothing more.
+     *
+     * Nothing here needs the parts, so nothing here takes the phrase apart. Whatever added a phrase
+     * was handed back the exact string it is stored under, which is the string to send to get rid of
+     * it, and a name that matches nothing is already the state the caller was asking for.
+     */
+    removeWatch(phrase: string): Watch[] {
+        const wanted = phrase.replace(/\s+/g, " ").trim();
         // A default is permanent. It comes back on the next restart whatever anyone does, so removing
         // one would only mean it disappears until then, which is worse than not being able to.
-        if (DEFAULT_WATCHES.some(watch => watch.question === item)) {
+        if (DEFAULT_WATCHES.some(candidate => candidate.phrase === wanted)) {
             return this.listWatches();
         }
-        this.watches = this.watches.filter(watch => watch.question !== item);
+        if (!this.watches.some(candidate => candidate.phrase === wanted)) {
+            return this.listWatches();
+        }
+        this.watches = this.watches.filter(candidate => candidate.phrase !== wanted);
         // Its last answer goes with it, so re-adding it later starts clean rather than resuming.
-        this.yes = this.yes.filter(candidate => candidate !== item);
+        this.yes = this.yes.filter(candidate => candidate !== wanted);
         this.questionsChanged();
-        log(`no longer asking ${JSON.stringify(item)}`);
-        return this.listWatches();
-    }
-
-    /** Renaming what the model answers with, for a question that is not a permanent one. */
-    setKeyword(question: string, keyword: string): Watch[] {
-        const item = normalizeQuestion(question);
-        const word = normalizeKeyword(keyword);
-        if (!word) {
-            throw new Error(`A keyword is required`);
-        }
-        if (word.length > MAX_KEYWORD_LENGTH) {
-            throw new Error(`A keyword must be at most ${MAX_KEYWORD_LENGTH} characters`);
-        }
-        if (DEFAULT_WATCHES.some(watch => watch.question === item)) {
-            throw new Error(`The permanent questions keep their own keywords`);
-        }
-        const watch = this.watches.find(candidate => candidate.question === item);
-        if (!watch) {
-            throw new Error(`That question is not being asked`);
-        }
-        if (this.watches.some(candidate => candidate !== watch && candidate.keyword === word)) {
-            throw new Error(`The keyword ${JSON.stringify(word)} is already used by another question`);
-        }
-        watch.keyword = word;
-        this.questionsChanged();
-        log(`${JSON.stringify(item)} now answers as ${JSON.stringify(word)}`);
+        log(`no longer asking ${JSON.stringify(wanted)}`);
         return this.listWatches();
     }
 
@@ -340,8 +318,12 @@ class Recorder {
         for (const line of lines) {
             try {
                 const logged = JSON.parse(line) as { at: number; state?: string[]; added?: string[]; removed?: string[] };
-                const added = logged.added ?? [];
-                const removed = logged.removed ?? [];
+                // Lines written before the word moved into the phrase say "is a person present" where
+                // today's say "is a person present (person)". Read as the same thing, or replaying the
+                // morning would leave every one of them stuck on as something nothing can turn off.
+                const added = (logged.added ?? []).map(canonicalPhrase);
+                const removed = (logged.removed ?? []).map(canonicalPhrase);
+                logged.state = logged.state?.map(canonicalPhrase);
                 state = logged.state
                     ? [...logged.state]
                     : [...state.filter(item => !removed.includes(item)), ...added.filter(item => !state.includes(item))];
@@ -353,9 +335,9 @@ class Recorder {
             }
         }
         this.recent = this.recent.slice(-RECENT_LIMIT);
-        // Only answers to questions still being asked carry over; the rest were about questions that
+        // Only answers to phrases still being asked carry over; the rest were about phrases that
         // have since been removed or reworded.
-        this.yes = state.filter(question => this.questions.includes(question));
+        this.yes = state.filter(phrase => this.phrases.includes(phrase));
         log(`recovered ${lines.length} lines from today, ${this.yes.length} currently true`);
     }
 
@@ -489,7 +471,7 @@ class Recorder {
 
     /** False when the round produced nothing, which is the caller's cue to back off rather than spin. */
     async round(): Promise<boolean> {
-        if (this.questions.length === 0) {
+        if (this.phrases.length === 0) {
             return false;
         }
         const prompt = buildPrompt(this.watches);
@@ -521,16 +503,16 @@ class Recorder {
 
         const raw = String(reply.answer ?? "");
         const { yes, answered, unknown } = parseAnswers(raw, this.watches);
-        // Compared only against the questions this round actually answered. One the model skipped is
+        // Compared only against the phrases this round actually answered. One the model skipped is
         // not a no, and treating it as one would report something leaving that nobody said had left.
-        const before = this.yes.filter(question => answered.includes(question));
+        const before = this.yes.filter(phrase => answered.includes(phrase));
         const { added, removed } = diffAnswers(before, yes);
-        const unanswered = this.questions.filter(question => !answered.includes(question));
+        const unanswered = this.phrases.filter(phrase => !answered.includes(phrase));
         const entry: Entry = {
             at,
-            // A skipped question keeps its last answer rather than flapping to no and back.
-            state: this.questions.filter(question =>
-                yes.includes(question) || (unanswered.includes(question) && this.yes.includes(question))),
+            // A skipped phrase keeps its last answer rather than flapping to no and back.
+            state: this.phrases.filter(phrase =>
+                yes.includes(phrase) || (unanswered.includes(phrase) && this.yes.includes(phrase))),
             added,
             removed,
             unanswered,
@@ -570,12 +552,12 @@ class Recorder {
             failures: this.failures,
             buffered: this.recentFrames().length,
             bufferSeconds: FRAME_BUFFER_MS / 1000,
-            /** The questions and which of them are currently answered yes. */
-            /** Question and keyword together, since the keyword is what the model actually answers. */
+            /** Split into question and word, for anything that wants the parts rather than the whole. */
             watches: this.listWatches(),
-            questions: this.listQuestions(),
+            /** The phrases being watched, word and all. What an entry reports is one of these. */
+            phrases: this.listPhrases(),
             /** So the page can show which are permanent, and offer no way to remove those. */
-            defaults: DEFAULT_WATCHES.map(watch => watch.question),
+            defaults: DEFAULT_WATCHES.map(watch => watch.phrase),
             yes: [...this.yes],
             // Sent so the wording can be reviewed against the answers it is producing, live.
             prompt: buildPrompt(this.watches),
@@ -643,10 +625,7 @@ td { border-top: 1px solid var(--line); padding: 7px 6px; vertical-align: top; }
        padding: 2px 4px 2px 11px; margin-right: 6px; margin-bottom: 4px; }
 /* Permanent ones read as part of the furniture: filled, no cross, nothing to click. */
 .pin.always { padding: 2px 11px; background: #8882; border-color: transparent; }
-.keyword { font-family: ui-monospace, monospace; font-size: 12px; opacity: .95; margin-right: 8px;
-           padding: 0 6px; border-radius: 4px; background: #8883; }
-.pin:not(.always) .keyword { cursor: pointer; }
-.pin:not(.always) .keyword:hover { background: #d9822b; color: #fff; }
+.pin button { border: none; background: none; color: inherit; cursor: pointer; opacity: .5; padding: 0 6px;
               font-size: 15px; line-height: 1; border-radius: 999px; }
 .pin button:hover { opacity: 1; }
 #pin, #secret { display: inline-flex; gap: 6px; margin-bottom: 6px; }
@@ -658,8 +637,7 @@ td { border-top: 1px solid var(--line); padding: 7px 6px; vertical-align: top; }
                 background: none; color: inherit; min-width: 200px; }
 #secretNote { margin-bottom: 16px; min-height: 1.2em; }
 #pin input { font: inherit; padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px;
-             background: none; color: inherit; min-width: 240px; }
-#pin #keywordValue { min-width: 90px; font-family: ui-monospace, monospace; }
+             background: none; color: inherit; min-width: 340px; }
 #pinNote { margin-bottom: 16px; min-height: 1.2em; }
 .viewbar { margin: 4px 0 8px; }
 #deviations { margin-bottom: 16px; }
@@ -700,7 +678,7 @@ tr.fresh { animation: in .35s ease-out; }
 <div id="deviations"></div>
 <h2>watched in every frame</h2>
 <div class="pins"><span id="interests"></span></div>
-<form id="pin"><input id="keywordValue" placeholder="word" maxlength="24" autocomplete="off" spellcheck="false"><input id="phrase" placeholder="e.g. is anyone holding a phone" maxlength="120" autocomplete="off"><button type="submit">add</button></form>
+<form id="pin"><input id="phrase" placeholder="e.g. is anyone holding a phone (phone)" maxlength="140" autocomplete="off"><button type="submit">add</button></form>
 <div id="pinNote" class="quiet"></div>
 <h2>true right now</h2>
 <ul id="vocabulary"></ul>
@@ -1029,7 +1007,7 @@ document.getElementById("pin").onsubmit = async event => {
     const response = await api("/questions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: wanted, keyword: document.getElementById("keywordValue").value || undefined }),
+        body: JSON.stringify({ phrase: wanted }),
     });
     const reply = await response.json();
     if (reply.error) {
@@ -1037,7 +1015,6 @@ document.getElementById("pin").onsubmit = async event => {
         return;
     }
     phrase.value = "";
-    document.getElementById("keywordValue").value = "";
     pinNote.textContent = "added. it is asked of the next frame, about a second from now.";
 };
 
@@ -1299,7 +1276,8 @@ function setState(state) {
         vocabulary.append(li);
     }
     interests.replaceChildren();
-    if (state.questions.length === 0) {
+    const phrases = state.phrases || [];
+    if (phrases.length === 0) {
         const none = document.createElement("span");
         none.className = "quiet";
         none.textContent = "nothing watched yet, so nothing is being asked";
@@ -1308,50 +1286,33 @@ function setState(state) {
     // Permanent ones first and marked as such, with no cross on them. A default survives a restart
     // whatever anyone does, so offering to remove one would only mean it vanishes until then.
     const defaults = state.defaults || [];
-    const watches = (state.watches || []).slice().sort((left, right) =>
-        Number(defaults.includes(right.question)) - Number(defaults.includes(left.question)));
-    for (const watch of watches) {
+    const sorted = phrases.slice().sort((left, right) =>
+        Number(defaults.includes(right)) - Number(defaults.includes(left)));
+    for (const item of sorted) {
         const pin = document.createElement("span");
-        const permanent = defaults.includes(watch.question);
+        const permanent = defaults.includes(item);
         pin.className = permanent ? "pin always" : "pin";
-        // The word the model answers with, in front of the question it stands for. This is the
-        // mapping, so it belongs on screen rather than only in the prompt.
-        const word = document.createElement("b");
-        word.className = "keyword";
-        word.textContent = watch.keyword;
-        pin.append(word, watch.question);
+        // The whole phrase, word in parentheses and all. That word is what the model actually answers
+        // and therefore what you change when an answer comes back wrong, so it belongs on screen.
+        pin.append(item);
         if (permanent) {
             pin.title = "always asked, and cannot be removed";
         } else {
-            word.title = "click to change the word it answers with";
-            word.onclick = async () => {
-                const wanted = window.prompt("word the model should answer with for "
-                    + JSON.stringify(watch.question) + ":", watch.keyword);
-                if (!wanted) {
-                    return;
-                }
-                const reply = await (await api("/questions", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ question: watch.question, keyword: wanted }),
-                })).json();
-                pinNote.textContent = reply.error || ("now answering as " + wanted);
-            };
             const remove = document.createElement("button");
             remove.type = "button";
             remove.textContent = "×";
-            remove.title = "stop asking " + watch.question;
+            remove.title = "stop asking " + item;
             remove.onclick = async () => {
-                await api("/questions?question=" + encodeURIComponent(watch.question), { method: "DELETE" });
-                pinNote.textContent = "no longer asking " + watch.question;
+                await api("/questions?phrase=" + encodeURIComponent(item), { method: "DELETE" });
+                pinNote.textContent = "no longer asking " + item;
             };
             pin.append(remove);
         }
         interests.append(pin);
     }
-    if (watches.length > defaults.length) {
+    if (sorted.length > defaults.length) {
         pinNote.textContent = "the plain ones were added by something and go away on a restart"
-            + " unless whatever added them asks again. click a word to change what it answers with.";
+            + " unless whatever added them asks again.";
     }
 }
 
@@ -1596,36 +1557,36 @@ async function main() {
                 response.end(JSON.stringify(payload));
             };
             if (request.method === "GET") {
-                send(200, { watches: recorder.listWatches(), questions: recorder.listQuestions(), defaults: DEFAULT_WATCHES.map(watch => watch.question) });
+                send(200, {
+                    watches: recorder.listWatches(),
+                    phrases: recorder.listPhrases(),
+                    defaults: DEFAULT_WATCHES.map(watch => watch.phrase),
+                });
                 return;
             }
             if (request.method === "DELETE") {
                 // In the query rather than the body, so it can be removed with a plain curl -X DELETE.
-                const remaining = recorder.removeQuestion(url.searchParams.get("question") ?? "");
-                send(200, { watches: remaining, questions: remaining.map(w => w.question) });
+                const wanted = url.searchParams.get("phrase") ?? url.searchParams.get("question") ?? "";
+                const remaining = recorder.removeWatch(wanted);
+                send(200, { watches: remaining, phrases: remaining.map(watch => watch.phrase) });
                 return;
             }
             if (request.method === "POST") {
                 let body = "";
                 request.on("data", chunk => {
                     body += chunk;
-                    if (body.length > MAX_QUESTION_LENGTH * 8) {
+                    if (body.length > MAX_PHRASE_LENGTH * 8) {
                         request.destroy();
                     }
                 });
                 request.on("end", () => {
                     try {
-                        const parsed = JSON.parse(body) as { question?: unknown; keyword?: unknown };
-                        const question = String(parsed.question ?? "");
-                        const keyword = parsed.keyword === undefined ? undefined : String(parsed.keyword);
-                        // One route for both, because the difference is only whether it is there yet.
-                        // Posting a question that already exists with a keyword renames what it
-                        // answers with, which is the only thing left to change about it.
-                        const known = recorder.listWatches().some(watch => watch.question === normalizeQuestion(question));
-                        const watches = known && keyword !== undefined
-                            ? recorder.setKeyword(question, keyword)
-                            : recorder.addQuestion(question, keyword);
-                        send(200, { watches, questions: watches.map(watch => watch.question) });
+                        // "question" is still read, since the older name is what anything watching a
+                        // default was already sending and those keep working unchanged.
+                        const parsed = JSON.parse(body) as { phrase?: unknown; question?: unknown };
+                        const wanted = String(parsed.phrase ?? parsed.question ?? "");
+                        const watches = recorder.addWatch(wanted);
+                        send(200, { watches, phrases: watches.map(watch => watch.phrase) });
                     } catch (error) {
                         send(400, { error: (error as Error).message });
                     }

@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
+import { canonicalPhrase } from "./questions";
 
 /**
  * Reading the day files back, and working out how much of the time each thing was true.
@@ -72,7 +73,15 @@ export function readHistory(directory: string, days: number): { events: HistoryE
             try {
                 const parsed = JSON.parse(line) as HistoryEvent;
                 if (typeof parsed.at === "number") {
-                    events.push(parsed);
+                    // A week of files straddles the day the word moved into the phrase, so the same
+                    // condition is written two ways. Read as one, or every stat covering that day
+                    // would be split down the middle by a change that was only ever cosmetic.
+                    events.push({
+                        at: parsed.at,
+                        state: parsed.state?.map(canonicalPhrase),
+                        added: parsed.added?.map(canonicalPhrase),
+                        removed: parsed.removed?.map(canonicalPhrase),
+                    });
                 }
             } catch {
                 // A half written last line after a hard stop. Skipped rather than complained about.

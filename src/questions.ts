@@ -14,9 +14,20 @@
  * thought it saw, which is why unrecognised words are kept and shown rather than dropped.
  */
 
+/**
+ * A phrase carries its own word, in parentheses at the end: "is eating pizza (pizza)".
+ *
+ * One string rather than a question and a keyword side by side. The word has to be visible wherever
+ * the phrase is, since it is what the model actually answers and therefore the thing you tune when an
+ * answer comes back wrong. Keeping it inside the phrase means every place that shows a phrase shows
+ * it already, and there is one identity to pass around instead of a pair to keep together.
+ */
 export type Watch = {
+    /** The whole thing, "is eating pizza (pizza)". This is the identity: what an entry reports. */
+    phrase: string;
+    /** What the model is asked, "is eating pizza". */
     question: string;
-    /** The single word the model answers with. */
+    /** What the model answers with, "pizza". */
     keyword: string;
 };
 
@@ -27,33 +38,29 @@ export type Watch = {
  * watcher that has gone away takes its question with it. Persisting them meant the list only ever
  * grew, and each entry costs tokens on every single frame.
  */
-export const DEFAULT_WATCHES: Watch[] = [
-    { keyword: "person", question: "is a person present" },
-    { keyword: "drinking", question: "is anyone drinking" },
-    { keyword: "mouse", question: "is a hand on the mouse" },
-    { keyword: "typing", question: "is anyone typing" },
-    { keyword: "eating", question: "is anyone eating" },
-    { keyword: "headphones", question: "is anyone wearing headphones" },
-    { keyword: "shirt", question: "is wearing shirt" },
-    { keyword: "door", question: "is the door open" },
-    { keyword: "lit", question: "is well lit" },
-    { keyword: "tilted", question: "head tilted back with hands on face" },
+export const DEFAULT_PHRASES = [
+    "is a person present (person)",
+    "is anyone drinking (drinking)",
+    "is a hand on the mouse (mouse)",
+    "is anyone typing (typing)",
+    "is anyone eating (eating)",
+    "is anyone wearing headphones (headphones)",
+    "is wearing shirt (shirt)",
+    "is the door open (door)",
+    "is well lit (lit)",
+    "head tilted back with hands on face (tilted)",
 ];
 
 /** Named because smartpause watches exactly this one, so a reword here cannot orphan it there. */
-export const HEADPHONES_QUESTION = "is anyone wearing headphones";
+export const HEADPHONES_PHRASE = "is anyone wearing headphones (headphones)";
 
 export const MAX_QUESTIONS = 26;
-export const MAX_QUESTION_LENGTH = 120;
+export const MAX_PHRASE_LENGTH = 140;
 export const MAX_KEYWORD_LENGTH = 24;
 /** Said instead of an empty answer. Checked as a word before anything is matched against it. */
 const NONE_TRUE = /^(none|nothing|n\/a|no|empty)$/i;
-/** Too common to tell one question from another, so never derived as a keyword. */
-const WEAK_WORDS = new Set([
-    "is", "are", "a", "an", "the", "of", "on", "in", "at", "to", "with", "and", "or",
-    "any", "anyone", "anything", "someone", "something", "there", "present", "has", "have",
-    "his", "her", "their", "it", "its", "this", "that", "being", "doing",
-]);
+/** The trailing "(word)". Nothing nested, because a keyword is one plain word. */
+const WITH_KEYWORD = /^(.*?)\s*\(\s*([^()]*?)\s*\)$/;
 
 export function normalizeQuestion(question: string): string {
     return question.replace(/\s+/g, " ").trim();
@@ -64,43 +71,60 @@ export function normalizeKeyword(keyword: string): string {
     return keyword.trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
-/**
- * A keyword for a question that arrived without one.
- *
- * Callers are meant to name their own, and a built in question is looked up rather than derived. This
- * is the fallback for everything else: the first word carrying any meaning, since "is anyone holding
- * a phone" is about phones and not about anyone. Uniqueness matters more than elegance here, because
- * two questions sharing a word makes an answer ambiguous, so a clash gets a digit.
- */
-export function deriveKeyword(question: string, taken: string[]): string {
-    const words = normalizeQuestion(question).toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
-    const meaningful = words.filter(word => !WEAK_WORDS.has(word));
-    // From the end, because the subject is usually last: "is anyone holding a phone" is about phones.
-    // A different word from the same question beats a digit, so all of them are tried before that.
-    for (const candidate of [...meaningful].reverse()) {
-        const word = normalizeKeyword(candidate).slice(0, MAX_KEYWORD_LENGTH);
-        if (word && !taken.includes(word)) {
-            return word;
-        }
+/** The pure split, with no fallback. Undefined when there is no usable word in parentheses. */
+function splitPhrase(phrase: string): Watch | undefined {
+    const match = WITH_KEYWORD.exec(normalizeQuestion(phrase));
+    if (!match) {
+        return undefined;
     }
-    let base = normalizeKeyword(meaningful[meaningful.length - 1] ?? words[0] ?? "watch").slice(0, MAX_KEYWORD_LENGTH);
-    if (!base) {
-        base = "watch";
+    const question = normalizeQuestion(match[1]);
+    const keyword = normalizeKeyword(match[2]);
+    if (!question || !keyword) {
+        return undefined;
     }
-    if (!taken.includes(base)) {
-        return base;
-    }
-    for (let suffix = 2; suffix < 100; suffix++) {
-        if (!taken.includes(`${base}${suffix}`)) {
-            return `${base}${suffix}`;
-        }
-    }
-    return `${base}${Date.now() % 1000}`;
+    return { phrase: `${question} (${keyword})`, question, keyword };
 }
 
-/** The keyword a built in question already has, so an old caller naming one needs to know nothing. */
-export function defaultKeywordFor(question: string): string | undefined {
-    return DEFAULT_WATCHES.find(watch => watch.question === normalizeQuestion(question))?.keyword;
+export const DEFAULT_WATCHES: Watch[] = DEFAULT_PHRASES.map(phrase => {
+    const watch = splitPhrase(phrase);
+    if (!watch) {
+        throw new Error(`the default ${JSON.stringify(phrase)} is missing its word in parentheses`);
+    }
+    return watch;
+});
+
+/**
+ * "is eating pizza (pizza)" into its parts, or a refusal.
+ *
+ * Naming the word is the caller's job, since the caller is the one who finds out it was the wrong
+ * word. A phrase arriving without one is only accepted if it is a default, which is what lets
+ * anything already watching "is anyone wearing headphones" keep saying that and nothing else.
+ *
+ * Everything else is refused rather than given a word derived from its own. Deriving one was the
+ * first attempt and it is quietly worse: the caller never agreed to the word, cannot see it without
+ * asking, and finds out it clashed with another question only by getting answers meant for that one.
+ */
+export function parseWatch(phrase: string): Watch {
+    const wanted = normalizeQuestion(phrase);
+    if (!wanted) {
+        throw new Error(`A phrase is required`);
+    }
+    if (wanted.length > MAX_PHRASE_LENGTH) {
+        throw new Error(`A phrase must be at most ${MAX_PHRASE_LENGTH} characters`);
+    }
+    const split = splitPhrase(wanted);
+    if (split) {
+        if (split.keyword.length > MAX_KEYWORD_LENGTH) {
+            throw new Error(`The word in parentheses must be at most ${MAX_KEYWORD_LENGTH} characters`);
+        }
+        return split;
+    }
+    const fallback = DEFAULT_WATCHES.find(watch => watch.question === wanted);
+    if (fallback) {
+        return { ...fallback };
+    }
+    throw new Error(`${JSON.stringify(wanted)} needs the word the model should answer with, in`
+        + ` parentheses at the end, like "is eating pizza (pizza)"`);
 }
 
 export function buildPrompt(watches: Watch[]): string {
@@ -116,9 +140,9 @@ export function buildPrompt(watches: Watch[]): string {
 }
 
 export type Answers = {
-    /** Questions the model said were true. */
+    /** Phrases the model said were true. */
     yes: string[];
-    /** Questions it decided about at all. Empty when the reply made no sense. */
+    /** Phrases it decided about at all. Empty when the reply made no sense. */
     answered: string[];
     /**
      * Words it used that were never offered.
@@ -130,7 +154,7 @@ export type Answers = {
 };
 
 export function parseAnswers(reply: string, watches: Watch[]): Answers {
-    const questions = watches.map(watch => watch.question);
+    const phrases = watches.map(watch => watch.phrase);
     const words = reply.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
     if (words.length === 0) {
         return { yes: [], answered: [], unknown: [] };
@@ -138,7 +162,7 @@ export function parseAnswers(reply: string, watches: Watch[]): Answers {
     // Everything was decided and nothing was true. Checked before any matching, since a keyword could
     // otherwise be found inside it.
     if (words.length === 1 && NONE_TRUE.test(words[0])) {
-        return { yes: [], answered: [...questions], unknown: [] };
+        return { yes: [], answered: [...phrases], unknown: [] };
     }
 
     const chosen: string[] = [];
@@ -146,8 +170,8 @@ export function parseAnswers(reply: string, watches: Watch[]): Answers {
     for (const word of words) {
         const watch = watches.find(candidate => candidate.keyword === word);
         if (watch) {
-            if (!chosen.includes(watch.question)) {
-                chosen.push(watch.question);
+            if (!chosen.includes(watch.phrase)) {
+                chosen.push(watch.phrase);
             }
         } else if (!unknown.includes(word)) {
             unknown.push(word);
@@ -160,8 +184,8 @@ export function parseAnswers(reply: string, watches: Watch[]): Answers {
     }
     return {
         // In the order asked, so two rounds are comparable by eye.
-        yes: questions.filter(question => chosen.includes(question)),
-        answered: [...questions],
+        yes: phrases.filter(phrase => chosen.includes(phrase)),
+        answered: [...phrases],
         unknown,
     };
 }
@@ -169,7 +193,20 @@ export function parseAnswers(reply: string, watches: Watch[]): Answers {
 /** What changed, by comparing two answer sets rather than by asking the model what changed. */
 export function diffAnswers(before: string[], after: string[]): { added: string[]; removed: string[] } {
     return {
-        added: after.filter(question => !before.includes(question)),
-        removed: before.filter(question => !after.includes(question)),
+        added: after.filter(phrase => !before.includes(phrase)),
+        removed: before.filter(phrase => !after.includes(phrase)),
     };
+}
+
+/**
+ * An old bare question from a log file, as the phrase it is now.
+ *
+ * The day files predate the word being part of the phrase, so a week of history says "is a person
+ * present" where today's rounds say "is a person present (person)". Left alone, the two would be
+ * counted as separate conditions and a stat would be split down the middle at the moment of the
+ * change. Only the defaults can be recovered this way, which is nearly all of what is in there.
+ */
+export function canonicalPhrase(written: string): string {
+    const wanted = normalizeQuestion(written);
+    return DEFAULT_WATCHES.find(watch => watch.question === wanted)?.phrase ?? wanted;
 }
