@@ -4,7 +4,7 @@ import * as path from "path";
 import { WebSocketServer, WebSocket } from "ws";
 import { formatDateTime } from "socket-function/src/formatting/format";
 import { dayStamp, millisecondStamp } from "./src/timestamps";
-import { buildPrompt, parseRound, remember, DEFAULT_VOCABULARY_SIZE } from "./src/actionVocabulary";
+import { buildPrompt, parseRound, FULL_DESCRIBE_EVERY } from "./src/scene";
 
 const EYE2_URL = "http://127.0.0.1:8770";
 const PORT = 8772;
@@ -45,8 +45,12 @@ function log(message: string) {
 
 type Entry = {
     at: number;
-    actions: string[];
+    /** The whole scene after this round, rebuilt from the change the model reported. */
+    state: string[];
     added: string[];
+    removed: string[];
+    /** True when this round asked for a full description instead of a change, which resets the state. */
+    full: boolean;
     /** Exactly what the model said, so a parsing decision can always be second guessed later. */
     raw: string;
     promptTokens: number;
@@ -69,7 +73,9 @@ type BufferedFrame = {
 type Listener = (entry: Entry) => void;
 
 class Recorder {
-    private vocabulary: string[] = [];
+    private scene: string[] = [];
+    /** Counts up to a full description, so drift in the carried state gets cleared out periodically. */
+    private sinceFull = 0;
     private recent: Entry[] = [];
     private day = "";
     private stream: fs.WriteStream | undefined;
@@ -79,13 +85,13 @@ class Recorder {
     failures = 0;
     framesMissing = 0;
 
-    constructor(private index: number, private vocabularySize: number) {
+    constructor(private index: number, private describeEvery: number) {
         fs.mkdirSync(LOG_DIRECTORY, { recursive: true });
         fs.mkdirSync(TRAINING_DIRECTORY, { recursive: true });
         this.loadToday();
     }
 
-    /** Restarting mid day must not start the vocabulary or the page from nothing. */
+    /** Restarting mid day must not start the page from nothing, or re-describe a scene it knows. */
     private loadToday() {
         const file = path.join(LOG_DIRECTORY, `${dayStamp(Date.now())}.jsonl`);
         if (!fs.existsSync(file)) {
@@ -96,13 +102,14 @@ class Recorder {
             try {
                 const entry = JSON.parse(line) as Entry;
                 this.recent.push(entry);
-                this.vocabulary = remember(this.vocabulary, entry.actions, this.vocabularySize);
+                // The last round's scene is the scene; it was already rebuilt once, on the way in.
+                this.scene = entry.state ?? [];
             } catch {
                 // A half written last line is expected after a hard stop, and is not worth a complaint.
             }
         }
         this.recent = this.recent.slice(-RECENT_LIMIT);
-        log(`recovered ${lines.length} rounds from today, vocabulary is ${this.vocabulary.length} deep`);
+        log(`recovered ${lines.length} rounds from today, the scene holds ${this.scene.length} things`);
     }
 
     /**
@@ -152,7 +159,7 @@ class Recorder {
         const cutoff = Date.now() - FRAME_BUFFER_MS;
         return this.frames.filter(frame => frame.at >= cutoff).map(frame => {
             const entry = this.nearestEntry(frame.at);
-            return { id: frame.id, at: frame.at, reported: entry?.actions ?? [], raw: entry?.raw ?? "" };
+            return { id: frame.id, at: frame.at, reported: entry?.state ?? [], raw: entry?.raw ?? "" };
         });
     }
 
@@ -172,9 +179,9 @@ class Recorder {
         fs.writeFileSync(path.join(TRAINING_DIRECTORY, `${stem}.json`), JSON.stringify({
             at: frame.at,
             missing: note,
-            reported: entry?.actions ?? [],
+            reported: entry?.state ?? [],
             raw: entry?.raw ?? "",
-            prompt: buildPrompt(this.vocabulary),
+            prompt: buildPrompt(this.scene, false),
         }, undefined, 2));
         log(`annotated ${stem}: ${JSON.stringify(note)}`);
         return { saved: `${stem}.jpg` };
@@ -204,7 +211,10 @@ class Recorder {
 
     /** False when the round produced nothing, which is the caller's cue to back off rather than spin. */
     async round(): Promise<boolean> {
-        const prompt = buildPrompt(this.vocabulary);
+        // A full description when the scene is unknown, and again every so often to clear out anything
+        // the model stopped mentioning without ever saying it had gone.
+        const full = this.scene.length === 0 || this.sinceFull >= this.describeEvery;
+        const prompt = buildPrompt(this.scene, full);
         const at = Date.now();
         let reply: Record<string, unknown>;
         try {
@@ -227,11 +237,13 @@ class Recorder {
         }
 
         const raw = String(reply.answer ?? "");
-        const { actions, added } = parseRound(raw, this.vocabulary);
+        const { state, added, removed } = parseRound(raw, this.scene, full);
         const entry: Entry = {
             at,
-            actions,
+            state,
             added,
+            removed,
+            full,
             raw,
             promptTokens: Number(reply.promptTokens ?? 0),
             outputTokens: Number(reply.outputTokens ?? 0),
@@ -240,12 +252,15 @@ class Recorder {
             generateMs: Number(reply.generateMs ?? 0),
             analyzeMs: Number(reply.analyzeMs ?? 0),
         };
-        this.vocabulary = remember(this.vocabulary, actions, this.vocabularySize);
+        this.scene = state;
+        this.sinceFull = full ? 0 : this.sinceFull + 1;
         this.append(entry);
         this.rounds++;
 
-        const shown = actions.map(action => added.includes(action) ? `NEW ${action}` : action);
-        log(`${entry.outputTokens} out tok, ${entry.analyzeMs.toFixed(0)}ms | ${shown.join(" | ") || "(nothing)"}`);
+        // Only the change is logged. A still scene is one line saying so, which is the whole point.
+        const change = [...added.map(item => `+ ${item}`), ...removed.map(item => `- ${item}`)];
+        log(`${entry.outputTokens} out tok, ${entry.analyzeMs.toFixed(0)}ms`
+            + `${full ? " | DESCRIBED" : ""} | ${change.join(" | ") || "no change"}`);
         return true;
     }
 
@@ -255,11 +270,11 @@ class Recorder {
             failures: this.failures,
             buffered: this.recentFrames().length,
             bufferSeconds: FRAME_BUFFER_MS / 1000,
-            // Newest first for reading. The letters are an encoding detail between here and the model,
-            // so they stay out of the page: what matters is which actions are currently remembered.
-            vocabulary: [...this.vocabulary].reverse(),
+            /** What the model currently believes is in front of it, which is what it is asked against. */
+            scene: this.scene,
+            roundsUntilDescribe: Math.max(0, this.describeEvery - this.sinceFull),
             // Sent so the wording can be reviewed against the answers it is producing, live.
-            prompt: buildPrompt(this.vocabulary),
+            prompt: buildPrompt(this.scene, false),
         };
     }
 
@@ -312,6 +327,9 @@ td { border-top: 1px solid var(--line); padding: 7px 6px; vertical-align: top; }
 .cost { white-space: nowrap; opacity: .55; text-align: right; width: 1%; }
 .action { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 1px 10px; margin: 2px 4px 2px 0; }
 .action.new { border-color: #d9822b; color: #d9822b; font-weight: 600; }
+.action.gone { border-color: #7a8ba0; color: #7a8ba0; text-decoration: line-through; }
+.badge { display: inline-block; border-radius: 4px; padding: 1px 7px; margin-right: 6px; font-size: 11px;
+         text-transform: uppercase; letter-spacing: .05em; background: #8882; opacity: .8; }
 .quiet { opacity: .5; }
 /* New rounds arrive at the top, so they fade in rather than making the whole list jump. */
 tr.fresh { animation: in .35s ease-out; }
@@ -320,7 +338,7 @@ tr.fresh { animation: in .35s ease-out; }
 <h1>eye actions</h1>
 <div class="meta"><span id="link"></span><span id="stats">connecting</span></div>
 <details><summary>the prompt being sent right now</summary><pre id="prompt"></pre></details>
-<h2>remembered actions</h2>
+<h2>the scene right now</h2>
 <ul id="vocabulary"></ul>
 <h2>frames <span id="buffered" class="quiet"></span></h2>
 <div><button id="capture">capture frames</button> <span id="note" class="quiet"></span></div>
@@ -486,17 +504,31 @@ function row(entry) {
     when.className = "time";
     when.textContent = time(entry.at);
     const what = document.createElement("td");
-    if (entry.actions.length === 0) {
+    // Only the change. A still scene says so in one word instead of restating itself every row, which
+    // is what makes the column scannable for the moment something actually happened.
+    if (entry.full) {
+        const badge = document.createElement("span");
+        badge.className = "badge";
+        badge.textContent = "described";
+        what.append(badge);
+    }
+    for (const action of entry.added) {
+        const tag = document.createElement("span");
+        tag.className = "action new";
+        tag.textContent = "+ " + action;
+        what.append(tag);
+    }
+    for (const action of entry.removed) {
+        const tag = document.createElement("span");
+        tag.className = "action gone";
+        tag.textContent = "- " + action;
+        what.append(tag);
+    }
+    if (!entry.full && entry.added.length === 0 && entry.removed.length === 0) {
         const none = document.createElement("span");
         none.className = "quiet";
-        none.textContent = "nothing";
+        none.textContent = "no change";
         what.append(none);
-    }
-    for (const action of entry.actions) {
-        const tag = document.createElement("span");
-        tag.className = entry.added.includes(action) ? "action new" : "action";
-        tag.textContent = action;
-        what.append(tag);
     }
     const cost = document.createElement("td");
     cost.className = "cost";
@@ -528,7 +560,7 @@ function setState(state) {
     buffered.textContent = state.buffered + " frames held, last " + state.bufferSeconds + "s";
     prompt.textContent = state.prompt;
     vocabulary.replaceChildren();
-    for (const action of state.vocabulary) {
+    for (const action of state.scene) {
         const li = document.createElement("li");
         li.textContent = action;
         vocabulary.append(li);
@@ -565,21 +597,21 @@ async function main() {
     const args = process.argv.slice(2);
     let intervalSeconds = DEFAULT_INTERVAL_SECONDS;
     let index = DEFAULT_INDEX;
-    let vocabularySize = DEFAULT_VOCABULARY_SIZE;
+    let describeEvery = FULL_DESCRIBE_EVERY;
     for (let position = 0; position < args.length; position++) {
         if (args[position] === "--every") {
             intervalSeconds = Number(args[++position]);
         } else if (args[position] === "--index") {
             index = Number(args[++position]);
-        } else if (args[position] === "--vocabulary") {
-            vocabularySize = Number(args[++position]);
+        } else if (args[position] === "--describe-every") {
+            describeEvery = Number(args[++position]);
         } else {
-            console.error(`Unknown argument ${args[position]}; known are --every, --index, --vocabulary`);
+            console.error(`Unknown argument ${args[position]}; known are --every, --index, --describe-every`);
             process.exit(1);
         }
     }
 
-    const recorder = new Recorder(index, vocabularySize);
+    const recorder = new Recorder(index, describeEvery);
 
     const server = http.createServer((request, response) => {
         const url = new URL(request.url ?? "/", `http://${HOST}:${PORT}`);
@@ -661,7 +693,7 @@ async function main() {
         log(`serving the action log on http://${HOST}:${PORT}`);
         log(`  /        the page, fed over a websocket`);
         log(`  /log     json, ?since=<ms epoch>&limit=<n>`);
-        log(`  /status  rounds and the current vocabulary`);
+        log(`  /status  rounds and the scene the model is working from`);
     });
 
     // Its own loop, so how often frames are kept does not depend on how long an answer takes.
@@ -676,7 +708,7 @@ async function main() {
         }
     })();
 
-    log(`asking camera ${index} ${intervalSeconds > 0 ? `every ${intervalSeconds}s` : `back to back`}, keeping ${vocabularySize} lettered actions`);
+    log(`asking camera ${index} ${intervalSeconds > 0 ? `every ${intervalSeconds}s` : `back to back`}, re-describing the whole scene every ${describeEvery} rounds`);
     while (true) {
         const startedAtMs = Date.now();
         const answered = await recorder.round();

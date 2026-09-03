@@ -46,6 +46,7 @@
         "smartpause": "typenode ./smartpause.ts 2",
         "autopause": "typenode ./autopause.ts %USERPROFILE%/Desktop/view2.bat",
         "bench:quant": "typenode ./scripts/benchQuant.ts",
+        "test:scene": "typenode ./scripts/sceneParse.test.ts",
         "watch": "typenode ./scripts/watch.ts",
         "actions": "typenode ./actions.ts"
     },
