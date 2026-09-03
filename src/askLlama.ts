@@ -9,6 +9,15 @@ import { AskResult } from "./askClient";
 const READY_TIMEOUT_MS = 300_000;
 const RESTART_DELAY_MS = 5_000;
 const HEALTH_POLL_MS = 500;
+/**
+ * A frame answers in about 1.5s, so a request still open after this is not slow, it is stuck. Without
+ * a deadline here one wedged request stops everything for good: eye2 answers one question at a time
+ * and waits on this promise, so a fetch that never settles is a permanent deadlock rather than a
+ * slow reply. Seen in practice, with the server still passing its health check while a slot hung.
+ */
+const REQUEST_TIMEOUT_MS = 30_000;
+/** Consecutive stuck requests before the server is presumed wedged and restarted out from under itself. */
+const FAILURES_BEFORE_RESTART = 2;
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.SMARTCAMERA_LLAMA_PORT || 8771);
 /**
@@ -66,6 +75,7 @@ export class LlamaAskClient {
     private ready = false;
     private stopped = false;
     private imageTokens = 0;
+    private consecutiveFailures = 0;
     private readyResolve: ((tokens: number) => void) | undefined;
     private readyReject: ((error: Error) => void) | undefined;
 
@@ -189,6 +199,7 @@ export class LlamaAskClient {
         const response = await fetch(`http://${HOST}:${PORT}/v1/chat/completions`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
+            signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
             body: JSON.stringify({
                 messages: [{
                     role: "user",
@@ -225,6 +236,7 @@ export class LlamaAskClient {
         const startedAtMs = Date.now();
         try {
             const body = await this.request(image, prompt, maxNewTokens);
+            this.consecutiveFailures = 0;
             const timings = body.timings ?? {};
             const prefillMs = timings.prompt_ms ?? 0;
             const generateMs = timings.predicted_ms ?? 0;
@@ -243,6 +255,17 @@ export class LlamaAskClient {
                 outputTokens: timings.predicted_n ?? 0,
                 roundTripMs: Date.now() - startedAtMs,
             };
+        } catch (error) {
+            // A server that has stopped answering will not start again on its own, and it keeps
+            // passing /health while it does it, so the count is what decides rather than the check.
+            this.consecutiveFailures++;
+            if (this.consecutiveFailures >= FAILURES_BEFORE_RESTART) {
+                this.onLog(`[model] ${this.consecutiveFailures} requests in a row went nowhere, restarting the server`);
+                this.consecutiveFailures = 0;
+                this.ready = false;
+                this.child?.kill();
+            }
+            throw error;
         } finally {
             this.pending = false;
         }

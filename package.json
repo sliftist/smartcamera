@@ -54,6 +54,7 @@
         "node-av": "*",
         "onnxruntime-node": "*",
         "sliftutils": "^1.7.121",
-        "socket-function": "*"
+        "socket-function": "*",
+        "ws": "*"
     }
 }
