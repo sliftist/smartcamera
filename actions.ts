@@ -50,15 +50,10 @@ function log(message: string) {
 
 type Entry = {
     at: number;
-    /** The whole scene after this round. Pinned phrases are answered separately and live in matched. */
+    /** Everything in the scene after this round, pinned phrases included and indistinguishable. */
     state: string[];
     added: string[];
     removed: string[];
-    /**
-     * The pinned phrases the scene holds right now, as an exact match. This is the field a caller
-     * watches: it registered the wording, so it can compare strings instead of interpreting prose.
-     */
-    matched: string[];
     /** True when this round asked for a full description instead of a change, which resets the state. */
     full: boolean;
     /** Exactly what the model said, so a parsing decision can always be second guessed later. */
@@ -173,9 +168,10 @@ class Recorder {
             try {
                 const entry = JSON.parse(line) as Entry;
                 this.recent.push(entry);
-                // The last round's scene is the scene; it was already rebuilt once, on the way in.
-                this.scene = entry.state ?? [];
-                this.matched = entry.matched ?? [];
+                // Split back apart on the way in, because the prompt shows only the described half.
+                const state = entry.state ?? [];
+                this.matched = state.filter(item => this.interests.includes(item));
+                this.scene = state.filter(item => !this.interests.includes(item));
             } catch {
                 // A half written last line is expected after a hard stop, and is not worth a complaint.
             }
@@ -309,21 +305,20 @@ class Recorder {
         }
 
         const raw = String(reply.answer ?? "");
-        // Two answers in one reply: what changed in the scene, and which pinned phrases are true.
+        // The letters are asked for separately only because the model answers that question better.
+        // They are expanded here and folded straight into the scene, so what comes out the other side
+        // reads as if the model had said the phrase itself. Nothing downstream knows a phrase was
+        // pinned, or should have to: it is one scene, and these are things in it.
         const { changes, matched } = splitReply(raw, this.interests);
-        // A pinned phrase is answered by letter and never belongs in the scene, but the model writes
-        // it into the changes half as well. Dropping it there keeps one fact in one place.
-        const state = parseRound(changes, this.scene, full)
+        const described = parseRound(changes, this.scene, full)
             .filter(item => !this.interests.includes(item));
-        // Pinned phrases are diffed alongside the scene, so a caller watching for one sees it appear
-        // and leave in the same stream as everything else rather than having to track it itself.
-        const { added, removed } = diffScenes([...this.scene, ...this.matched], [...state, ...matched]);
+        const state = [...described, ...matched];
+        const { added, removed } = diffScenes([...this.scene, ...this.matched], state);
         const entry: Entry = {
             at,
             state,
             added,
             removed,
-            matched,
             full,
             raw,
             promptTokens: Number(reply.promptTokens ?? 0),
@@ -333,7 +328,9 @@ class Recorder {
             generateMs: Number(reply.generateMs ?? 0),
             analyzeMs: Number(reply.analyzeMs ?? 0),
         };
-        this.scene = state;
+        // The prompt shows only what the model described. The pinned phrases go in as the lettered
+        // question instead, so they are held apart here and merged again on the way out.
+        this.scene = described;
         this.matched = matched;
         this.sinceFull = full ? 0 : this.sinceFull + 1;
         this.append(entry);
@@ -342,8 +339,7 @@ class Recorder {
         // Only the change is logged. A still scene is one line saying so, which is the whole point.
         const change = [...added.map(item => `+ ${item}`), ...removed.map(item => `- ${item}`)];
         log(`${entry.outputTokens} out tok, ${entry.analyzeMs.toFixed(0)}ms`
-            + `${full ? " | DESCRIBED" : ""} | ${change.join(" | ") || "no change"}`
-            + `${entry.matched.length > 0 ? `  << ${entry.matched.join(", ")}` : ""}`);
+            + `${full ? " | DESCRIBED" : ""} | ${change.join(" | ") || "no change"}`);
         return true;
     }
 
@@ -353,10 +349,9 @@ class Recorder {
             failures: this.failures,
             buffered: this.recentFrames().length,
             bufferSeconds: FRAME_BUFFER_MS / 1000,
-            /** What the model currently believes is in front of it, which is what it is asked against. */
-            scene: this.scene,
+            /** The whole scene, exactly as an entry reports it: no pinned phrase is distinguishable. */
+            scene: [...this.scene, ...this.matched],
             interests: this.listInterests(),
-            matched: [...this.matched],
             roundsUntilDescribe: Math.max(0, this.describeEvery - this.sinceFull),
             // Sent so the wording can be reviewed against the answers it is producing, live.
             prompt: buildPrompt(this.scene, this.interests, false),
@@ -420,9 +415,6 @@ td { border-top: 1px solid var(--line); padding: 7px 6px; vertical-align: top; }
 .pins { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 6px; }
 .pin { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 999px;
        padding: 2px 4px 2px 11px; margin-right: 6px; }
-/* A pinned phrase the scene currently holds. This is the thing an api caller is watching for. */
-.pin.hit { border-color: #2ba84a; color: #2ba84a; font-weight: 600; }
-.pin button { border: none; background: none; color: inherit; cursor: pointer; opacity: .5; padding: 0 6px;
               font-size: 15px; line-height: 1; border-radius: 999px; }
 .pin button:hover { opacity: 1; }
 #pin { display: inline-flex; gap: 6px; }
@@ -708,7 +700,7 @@ function setState(state) {
     for (const phrase of state.interests) {
         const pin = document.createElement("span");
         // Green while the scene actually holds it, which is the same condition an api caller sees.
-        pin.className = state.matched.includes(phrase) ? "pin hit" : "pin";
+        pin.className = "pin";
         pin.append(phrase);
         const remove = document.createElement("button");
         remove.type = "button";
@@ -789,7 +781,7 @@ async function main() {
                 response.end(JSON.stringify(payload));
             };
             if (request.method === "GET") {
-                send(200, { interests: recorder.listInterests(), matched: recorder.state.matched });
+                send(200, { interests: recorder.listInterests() });
                 return;
             }
             if (request.method === "DELETE") {

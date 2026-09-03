@@ -38,9 +38,10 @@ the model's account of what it changed, which is a different and less reliable t
 
 ## Phrases of interest
 
-Pin the exact words you want to watch for, then compare strings. Without this the model says
-"drinking water from a cup", then "sipping from a green cup", then "having a drink", and deciding
-whether those are the same event needs a language model at the other end too.
+Pin the exact words you want to watch for, then look for them in `state`, `added` and `removed` like
+anything else. Without this the model says "drinking water from a cup", then "sipping from a green
+cup", then "having a drink", and deciding whether those are the same event needs a language model at
+the other end too.
 
     GET    /interests                        -> { interests, matched }
     POST   /interests  {"phrase":"drinking"} -> { interests }
@@ -52,22 +53,20 @@ whether those are the same event needs a language model at the other end too.
 A pinned phrase takes effect on the next round, about a second later. Phrases are lowercased, capped
 at 60 characters and 20 at a time, and kept across restarts.
 
-How it works matters, because it decides what the answers mean. A pinned phrase is put into the list
-of scene contents handed to the model, as an ordinary item alongside everything else. The model is
-already asked, every round, which items in that list are no longer true; a pinned phrase is just
-another one of those. If it is not happening the model says so and the phrase is absent from that
-round's `matched`.
+Nothing downstream can tell a pinned phrase from anything else the model said. It appears in `state`,
+and appearing and leaving show up in `added` and `removed`, exactly as if the model had described it
+itself. That is the point: a caller pins the wording so it can compare strings, and then works with
+one scene rather than two lists.
 
-So the model declines every pinned phrase on every round it is not happening, which costs output
-tokens: a still scene with nothing pinned answers in 2, and with two phrases pinned in about 11. That
-is the price of the mechanism and it is worth it.
+How it works is an implementation detail, but a load bearing one. The phrases are lettered and asked
+as their own question, separate from the scene, and the model answers with the letters that are true.
+The letters are expanded back to their phrases here and folded into the scene before anything leaves.
 
-Declining a pinned phrase is not a scene change. The phrases are taken back out before the diff is
-computed, so `added` and `removed` never mention them; `matched` is the only place they appear.
-
-Telling the model about the phrases in prose instead does not work. Asked that way it read the list
-as an answer sheet and replied with nothing but the pinned phrases, and softer wordings either
-invented phrases that were not there or paraphrased the ones that were.
+Two other ways were tried first. Telling the model about the phrases in prose does not work: it read
+the list as an answer sheet and replied with nothing but the pinned phrases, and softer wordings
+either invented phrases that were not there or paraphrased the ones that were. Slipping them into the
+scene list as ordinary items does not work either: the model never integrated them, spent most of
+every reply declining the same ones, and flickered on the marginal ones. Asked directly, it answers.
 
 ## Reading it another way
 
