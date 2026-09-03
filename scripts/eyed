@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+#
+# Start, stop and inspect the two long running pieces of this repo as systemd services.
+#
+#   eye2         holds the rtsp session open, runs Qwen3-VL on the gpu, answers on 8770
+#   eye-actions  asks it what changed, records the answers, serves the page and api on 8772
+#
+# They were background processes for a while, which meant they did not survive a reboot and nothing
+# restarted them when they died. The units below restart on failure and come back at boot. The unit
+# files are generated from this script rather than kept as files, so the repo path is whatever the
+# repo is actually checked out at.
+
+set -euo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+UNIT_DIR=/etc/systemd/system
+SERVICES=(eye2 eye-actions)
+TYPENODE="$(command -v typenode || echo /usr/bin/typenode)"
+
+need_root() {
+    if [ "$(id -u)" -ne 0 ]; then
+        echo "This needs root, since it writes to $UNIT_DIR" >&2
+        exit 1
+    fi
+}
+
+write_units() {
+    cat > "$UNIT_DIR/eye2.service" <<UNIT
+[Unit]
+Description=eye2: rtsp frames answered by Qwen3-VL on the gpu
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$REPO
+Environment=HOME=/root
+Environment=PATH=/opt/rocm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# debug keeps the last 100 analysed frames on disk, which is what the watch script screenshots from.
+ExecStart=$TYPENODE ./eye2.ts instant debug
+Restart=always
+RestartSec=5
+# The weights are 10GB and take a few seconds to reach the card. Killing it early on a stop just
+# means the next start waits for the same load again.
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+    cat > "$UNIT_DIR/eye-actions.service" <<UNIT
+[Unit]
+Description=eye actions: what is happening, recorded and served
+After=eye2.service
+Wants=eye2.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$REPO
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=$TYPENODE ./actions.ts
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+}
+
+case "${1:-}" in
+install)
+    need_root
+    write_units
+    systemctl daemon-reload
+    systemctl enable "${SERVICES[@]}" >/dev/null
+    echo "installed and enabled at boot, pointing at $REPO"
+    echo "run '$0 start' to bring them up"
+    ;;
+start)
+    need_root
+    systemctl start "${SERVICES[@]}"
+    echo "starting; the model takes a few seconds to load"
+    ;;
+stop)
+    need_root
+    # Actions first, so it is not asking a model that is on its way down.
+    systemctl stop eye-actions eye2
+    echo "stopped"
+    ;;
+restart)
+    need_root
+    systemctl restart eye2
+    systemctl restart eye-actions
+    echo "restarted"
+    ;;
+status)
+    for service in "${SERVICES[@]}"; do
+        printf '%-14s %s' "$service" "$(systemctl is-active "$service")"
+        printf '  (restarts: %s)\n' "$(systemctl show "$service" -p NRestarts --value)"
+    done
+    printf '%-14s %s\n' "llama-server" "$(pgrep -c -f 'build/bin/llama-server' >/dev/null 2>&1 && echo running || echo "not running")"
+    echo
+    curl -sf --max-time 5 http://127.0.0.1:8770/status >/dev/null 2>&1 \
+        && echo "eye2     answering on 8770" || echo "eye2     NOT answering on 8770"
+    curl -sf --max-time 5 http://127.0.0.1:8772/status >/dev/null 2>&1 \
+        && echo "actions  answering on 8772" || echo "actions  NOT answering on 8772"
+    ;;
+logs)
+    journalctl -u eye2 -u eye-actions -f -n "${2:-40}"
+    ;;
+model-logs)
+    tail -f -n "${2:-60}" "$REPO/logs/llama-server.log"
+    ;;
+uninstall)
+    need_root
+    systemctl disable --now "${SERVICES[@]}" 2>/dev/null || true
+    rm -f "$UNIT_DIR/eye2.service" "$UNIT_DIR/eye-actions.service"
+    systemctl daemon-reload
+    echo "removed"
+    ;;
+*)
+    cat <<USAGE
+Usage: $0 <command>
+
+  install      write the unit files, enable both services at boot
+  start        bring both up
+  stop         take both down
+  restart      restart both, model first
+  status       what is up, how often it has restarted, whether it is answering
+  logs [n]     follow both service logs
+  model-logs   follow what llama.cpp itself prints, which is where a gpu fault shows up
+  uninstall    disable and remove the units
+USAGE
+    exit 1
+    ;;
+esac

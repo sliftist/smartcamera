@@ -41,6 +41,8 @@ const DEFAULT_MAX_NEW_TOKENS = 48;
 /** Every layer offloaded. The point of this backend is that nothing runs on the cpu. */
 const GPU_LAYERS = 99;
 const MODEL_DIRECTORY = path.join(__dirname, "..", "models");
+/** Everything llama.cpp prints, which is otherwise thrown away and is the only record of a hang. */
+const SERVER_LOG = path.join(__dirname, "..", "logs", "llama-server.log");
 const DEFAULT_MODEL = "Qwen3-VL-8B-Instruct-Q8_0.gguf";
 const DEFAULT_PROJECTOR = "mmproj-F16.gguf";
 
@@ -102,6 +104,7 @@ export class LlamaAskClient {
     }
 
     private launch() {
+        fs.mkdirSync(path.dirname(SERVER_LOG), { recursive: true });
         const model = modelFile();
         const projector = projectorFile();
         for (const file of [model, projector]) {
@@ -118,6 +121,9 @@ export class LlamaAskClient {
             "--port", String(PORT),
             "--parallel", "1",
             "--jinja",
+            // Whitespace separated, appended verbatim. Exists so a suspected bad kernel can be turned
+            // off in the unit file and watched for an hour without a rebuild, e.g. SMARTCAMERA_LLAMA_ARGS="-fa off".
+            ...(process.env.SMARTCAMERA_LLAMA_ARGS || "").split(/\s+/).filter(Boolean),
             "--no-webui",
         ];
         this.onLog(`[model] starting ${path.basename(model)} on the gpu`);
@@ -126,6 +132,13 @@ export class LlamaAskClient {
         this.ready = false;
         child.stdout.setEncoding("utf8");
         child.stderr.setEncoding("utf8");
+        // Kept, because when it hangs, what it said just before is the only account of why. Appended
+        // across restarts on purpose: the interesting part is always the run that has just ended.
+        const output = fs.createWriteStream(SERVER_LOG, { flags: "a" });
+        output.write(`\n=== started ${new Date().toISOString()} ===\n`);
+        child.stdout.on("data", chunk => output.write(chunk));
+        child.stderr.on("data", chunk => output.write(chunk));
+        child.on("exit", () => output.end());
         child.on("error", error => this.onLog(`[model] could not be spawned: ${(error as Error).message}`));
         child.on("exit", (code, signal) => {
             this.ready = false;
