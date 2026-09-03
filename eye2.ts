@@ -62,6 +62,8 @@ type CapturedImage = {
 
 type Request = {
     prompt: string;
+    /** When set, the same frame is also asked at this size and both answers come back. */
+    compare?: { width: number; height: number };
     resolve: (result: Record<string, unknown>) => void;
     reject: (error: Error) => void;
 };
@@ -351,12 +353,12 @@ class Server {
         }
     }
 
-    ask(index: number, prompt: string): Promise<Record<string, unknown>> {
+    ask(index: number, prompt: string, compare?: { width: number; height: number }): Promise<Record<string, unknown>> {
         // Demand is held for the whole request, so instant mode keeps decoding while we think.
         this.watchers[index].addDemand();
         const finished = new Promise<Record<string, unknown>>((resolve, reject) => {
             const queue = this.pending.get(index) ?? [];
-            queue.push({ prompt, resolve, reject });
+            queue.push({ prompt, compare, resolve, reject });
             this.pending.set(index, queue);
             void this.pump();
         });
@@ -425,11 +427,37 @@ class Server {
                         + (result.visionMs > 0 ? ` = vision ${result.visionMs.toFixed(0)} +` : ` =`)
                         + ` prefill ${result.prefillMs.toFixed(0)} (${result.promptTokens} tok)`
                         + ` + generate ${result.generateMs.toFixed(0)} (${result.outputTokens} tok)`);
+                    // Asked again on the very same pixels, at whatever size the caller named. Two
+                    // separate requests would each grab their own frame, and then every difference
+                    // between the answers would be the room having moved rather than the size.
+                    let comparison: Record<string, unknown> | undefined;
+                    if (request.compare) {
+                        const other = await this.client.ask(image, request.prompt, undefined, request.compare);
+                        comparison = {
+                            width: request.compare.width,
+                            height: request.compare.height,
+                            answer: other.answer,
+                            analyzeMs: other.modelMs,
+                            promptTokens: other.promptTokens,
+                            outputTokens: other.outputTokens,
+                        };
+                        console.log(`    ${" ".repeat(label.length)} at ${request.compare.width}x${request.compare.height}`
+                            + ` -> ${other.answer || "(empty)"}`);
+                    }
                     request.resolve({
                         index,
                         view: view.name,
                         prompt: request.prompt,
                         answer: result.answer,
+                        comparison,
+                        // Sent only when a comparison was asked for, since it is the one case where
+                        // the caller needs the exact pixels rather than a frame from about then.
+                        frameJpeg: request.compare
+                            ? encodeJpeg(...(() => {
+                                const scaled = resizeToFit(image, imageBudget().width, imageBudget().height);
+                                return [scaled.rgb, scaled.width, scaled.height] as const;
+                            })()).toString("base64")
+                            : undefined,
                         // Only in debug, where a frame is kept at all. A caller that wants to see what
                         // an answer was actually looking at has no other way to find it, since the
                         // number cycles and the next frame will take the name back.
@@ -669,7 +697,11 @@ async function main() {
                     send(400, { error: `prompt must be at most ${MAX_PROMPT_LENGTH} characters` });
                     return;
                 }
-                send(200, await server.ask(index, prompt));
+                const rawCompare = parameters.compare;
+                const compare = rawCompare && typeof rawCompare === "object"
+                    ? { width: Number((rawCompare as any).width), height: Number((rawCompare as any).height) }
+                    : undefined;
+                send(200, await server.ask(index, prompt, compare));
             } catch (error) {
                 send(500, { error: (error as Error).message });
             }

@@ -251,3 +251,35 @@ hour of downtime look identical in the file.
 Coming back after downtime counts as a new one, which is what it looks like from here.
 
 The page reads this once on load and shows it as a table.
+
+## Comparing resolutions
+
+The useful question about resolution is not how fast each size is, which is easy to measure, but what
+the cheaper one stops noticing. That only shows up on real frames from the actual room.
+
+    GET  /comparison                  -> { running, run, endsAt, rounds, deviations, higher, lower }
+    POST /comparison {"enabled":true}  start comparing against the next size down
+    POST /comparison {"enabled":false} stop
+
+    GET /comparisons                          -> { runs }
+    GET /comparisons/<run>                    -> { summary, deviations }
+    GET /comparisons/<run>/frames/<name>      the frame a deviation happened on
+
+While a run is going, every frame is asked twice: once at the size in use and once at the next preset
+down. Both answers come from the same captured frame, which is the whole reason eye2 does the second
+ask rather than the caller making a second request. Two requests would each get their own frame, and
+then every disagreement would be the room having moved.
+
+A round costs roughly double while this is on, so a run stops itself after an hour if nothing stops
+it first.
+
+Only disagreements are written. A run where the two sizes agree all afternoon leaves an empty file,
+which is the answer. Each deviation records what each size said, which questions they differed on,
+and the frame it happened on, kept in a `frames` folder beside the file.
+
+A summary counts each question two ways, because the direction is what matters. A question the
+smaller size keeps missing is a reason not to use it. One it keeps inventing is a different problem.
+
+The page has a button beside the resolutions to start and stop a run, and a separate button to load
+the deviations. That data is never fetched on page load: the frames are the only heavy thing here and
+nobody wants last week's run pulled down on every reload.

@@ -58,7 +58,9 @@
         "test:questions": "typenode ./scripts/questions.test.ts",
         "password": "typenode ./scripts/password.ts",
         "test:client": "typenode ./scripts/eyeClient.test.ts",
-        "test:history": "typenode ./scripts/history.test.ts"
+        "test:history": "typenode ./scripts/history.test.ts",
+        "test:comparison": "typenode ./scripts/comparison.test.ts",
+        "test": "yarn test:questions && yarn test:history && yarn test:comparison"
     },
     "dependencies": {
         "jpeg-js": "*",

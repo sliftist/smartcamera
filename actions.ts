@@ -8,6 +8,7 @@ import { buildPrompt, parseAnswers, diffAnswers, letterFor, normalizeQuestion, D
 import { readPassword, writePassword, passwordMatches, offeredPassword } from "./src/password";
 import { isLocalAddress } from "./src/network";
 import { readHistory, summarise } from "./src/history";
+import { ComparisonRun, nextSizeDown, listRuns, readRun, runDirectory, RUN_LIMIT_MS } from "./src/comparison";
 
 const EYE2_URL = "http://127.0.0.1:8770";
 const PORT = 8772;
@@ -48,6 +49,8 @@ const FRAME_PULL_MS = 1000;
  */
 const HEARTBEAT_MS = 60_000;
 const TRAINING_DIRECTORY = path.join(__dirname, "training");
+/** One folder per comparison run, each with its deviations and the frames that caused them. */
+const COMPARISON_DIRECTORY = path.join(LOG_DIRECTORY, "comparisons");
 const MAX_NOTE_LENGTH = 500;
 /** Optional. With no such file nothing is checked; set one with `yarn password`. */
 export const PASSWORD_FILE = path.join(LOG_DIRECTORY, "password.json");
@@ -114,6 +117,8 @@ class Recorder {
     private stream: fs.WriteStream | undefined;
     /** So a quiet stretch still leaves a mark, which is what makes downtime tellable from stillness. */
     private lastWroteAtMs = 0;
+    /** Set while a resolution comparison is running, which roughly doubles the cost of a round. */
+    private comparison: ComparisonRun | undefined;
     private listeners = new Set<Listener>();
     private frames: BufferedFrame[] = [];
     rounds = 0;
@@ -167,6 +172,52 @@ class Recorder {
         this.questionsChanged();
         log(`no longer asking ${JSON.stringify(item)}`);
         return this.listQuestions();
+    }
+
+    comparisonState(): Record<string, unknown> {
+        if (this.comparison?.expired) {
+            this.stopComparison();
+        }
+        return this.comparison
+            ? {
+                running: true,
+                run: this.comparison.run,
+                startedAt: this.comparison.startedAt,
+                endsAt: this.comparison.endsAt,
+                rounds: this.comparison.rounds,
+                deviations: this.comparison.deviations,
+                higher: this.comparison.higher,
+                lower: this.comparison.lower,
+            }
+            : { running: false };
+    }
+
+    async startComparison(): Promise<Record<string, unknown>> {
+        if (this.comparison) {
+            return this.comparisonState();
+        }
+        const response = await fetch(`${EYE2_URL}/resolution`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+        const higher = await response.json() as { width: number; height: number };
+        const lower = nextSizeDown(higher);
+        if (!lower) {
+            throw new Error(`Already at the smallest size, so there is nothing below it to compare against`);
+        }
+        this.comparison = new ComparisonRun(COMPARISON_DIRECTORY, { width: higher.width, height: higher.height }, lower);
+        log(`comparing ${higher.width}x${higher.height} against ${lower.width}x${lower.height}`
+            + ` for up to ${RUN_LIMIT_MS / 60000} minutes, as run ${this.comparison.run}`);
+        this.questionsChanged();
+        return this.comparisonState();
+    }
+
+    stopComparison(): Record<string, unknown> {
+        if (this.comparison) {
+            log(`stopped comparing after ${this.comparison.rounds} rounds`
+                + ` with ${this.comparison.deviations} disagreements`);
+            this.comparison.close();
+            this.comparison = undefined;
+            this.questionsChanged();
+        }
+        return { running: false };
     }
 
     /** Nothing is written; this only tells everyone the list moved so they can put theirs back. */
@@ -343,12 +394,17 @@ class Recorder {
         }
         const prompt = buildPrompt(this.questions);
         const at = Date.now();
+        // Stops itself, so an afternoon of double cost cannot be left running by forgetting about it.
+        if (this.comparison?.expired) {
+            this.stopComparison();
+        }
+        const compare = this.comparison?.lower;
         let reply: Record<string, unknown>;
         try {
             const response = await fetch(EYE2_URL, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ index: String(this.index), prompt }),
+                body: JSON.stringify({ index: String(this.index), prompt, compare }),
                 signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
             });
             reply = await response.json() as Record<string, unknown>;
@@ -386,6 +442,13 @@ class Recorder {
             generateMs: Number(reply.generateMs ?? 0),
             analyzeMs: Number(reply.analyzeMs ?? 0),
         };
+        // The comparison reads the same reply rather than asking again, so both sizes answered about
+        // one frame and any difference is the size rather than the moment.
+        if (this.comparison && reply.comparison) {
+            const other = reply.comparison as Record<string, unknown>;
+            const lower = parseAnswers(String(other.answer ?? ""), this.questions).yes;
+            this.comparison.record(at, yes, lower, typeof reply.frameJpeg === "string" ? reply.frameJpeg : undefined);
+        }
         this.yes = entry.state;
         this.append(entry);
         this.rounds++;
@@ -484,6 +547,12 @@ td { border-top: 1px solid var(--line); padding: 7px 6px; vertical-align: top; }
              background: none; color: inherit; min-width: 170px; }
 #pinNote { margin-bottom: 16px; min-height: 1.2em; }
 .viewbar { margin: 4px 0 8px; }
+#deviations { margin-bottom: 16px; }
+#deviations table { width: auto; min-width: min(560px, 100%); margin-bottom: 10px; }
+#deviations td { padding: 4px 14px 4px 0; }
+#deviations img { display: block; width: 100%; max-width: 440px; border-radius: 6px; margin-top: 6px; }
+#deviations figure { margin: 0 0 14px; }
+#deviations figcaption { font-size: 12px; opacity: .7; margin-bottom: 4px; }
 #historyTable { width: auto; min-width: min(560px, 100%); margin-bottom: 6px; }
 #historyTable td { padding: 5px 14px 5px 0; }
 #historyTable td.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
@@ -510,7 +579,9 @@ tr.fresh { animation: in .35s ease-out; }
 <div id="statsNote" class="quiet"></div>
 <h2>resolution shown to the model</h2>
 <div id="res"></div>
+<div class="viewbar"><button id="compare" type="button">compare with the next size down</button><button id="showDeviations" type="button">deviations</button></div>
 <div id="resNote" class="quiet"></div>
+<div id="deviations"></div>
 <h2>watched in every frame</h2>
 <div class="pins"><span id="interests"></span></div>
 <form id="pin"><input id="phrase" placeholder="e.g. hand on mouse" maxlength="120" autocomplete="off"><button type="submit">add</button></form>
@@ -695,6 +766,103 @@ async function showHistory() {
         : "share of the time it was being watched, not of the wall clock: a stretch where nothing was"
             + " running is left out rather than credited to whatever was true when it stopped.";
 }
+
+// Deliberately not loaded with the page. A run's frames are the one heavy thing here, and nobody
+// wants them fetched on every reload for a comparison they ran last week.
+const compareButton = document.getElementById("compare");
+const deviationsHolder = document.getElementById("deviations");
+
+async function showComparison(state) {
+    if (!state) {
+        try {
+            state = await (await api("/comparison")).json();
+        } catch (error) {
+            return;
+        }
+    }
+    if (state.running) {
+        const left = Math.max(0, Math.round((state.endsAt - Date.now()) / 60000));
+        compareButton.textContent = "stop comparing (" + state.lower.width + "x" + state.lower.height
+            + ", " + state.deviations + "/" + state.rounds + " differ, " + left + "m left)";
+        compareButton.className = "picked";
+    } else {
+        compareButton.textContent = "compare with the next size down";
+        compareButton.className = "";
+    }
+}
+
+compareButton.onclick = async () => {
+    const now = await (await api("/comparison")).json();
+    const reply = await (await api("/comparison", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: !now.running }),
+    })).json();
+    if (reply.error) {
+        document.getElementById("resNote").textContent = reply.error;
+        return;
+    }
+    await showComparison(reply);
+};
+
+document.getElementById("showDeviations").onclick = async () => {
+    if (deviationsHolder.children.length > 0) {
+        deviationsHolder.replaceChildren();
+        return;
+    }
+    const runs = (await (await api("/comparisons")).json()).runs || [];
+    if (runs.length === 0) {
+        deviationsHolder.textContent = "no comparison runs yet";
+        return;
+    }
+    const { summary, deviations } = await (await api("/comparisons/" + encodeURIComponent(runs[0]))).json();
+    deviationsHolder.replaceChildren();
+
+    const heading = document.createElement("div");
+    heading.className = "quiet";
+    heading.textContent = summary.higher.width + "x" + summary.higher.height + " against "
+        + summary.lower.width + "x" + summary.lower.height + ", " + summary.deviations
+        + " of " + summary.rounds + " rounds disagreed. run " + summary.run;
+    deviationsHolder.append(heading);
+
+    // Which way it went matters more than how often. A question the smaller size keeps missing is a
+    // reason not to use it; one it keeps inventing is a different problem entirely.
+    const table = document.createElement("table");
+    for (const row of summary.byQuestion) {
+        const tr = document.createElement("tr");
+        const what = document.createElement("td");
+        what.textContent = row.question;
+        const missed = document.createElement("td");
+        missed.textContent = row.missedByLower + " missed by the smaller";
+        const extra = document.createElement("td");
+        extra.textContent = row.extraInLower + " only the smaller saw";
+        tr.append(what, missed, extra);
+        table.append(tr);
+    }
+    deviationsHolder.append(table);
+
+    for (const deviation of deviations.slice(-25).reverse()) {
+        const figure = document.createElement("figure");
+        const caption = document.createElement("figcaption");
+        caption.textContent = time(deviation.at) + " differed on: " + deviation.differ.join(", ");
+        figure.append(caption);
+        for (const question of deviation.differ) {
+            const chip = document.createElement("span");
+            const inHigher = deviation.higher.includes(question);
+            chip.className = inHigher ? "action new" : "action gone";
+            chip.textContent = question + (inHigher ? " (only the larger)" : " (only the smaller)");
+            figure.append(chip);
+        }
+        if (deviation.frame) {
+            const image = document.createElement("img");
+            image.src = "/comparisons/" + encodeURIComponent(summary.run) + "/frames/"
+                + encodeURIComponent(deviation.frame) + (password ? "?password=" + encodeURIComponent(password) : "");
+            image.loading = "lazy";
+            figure.append(image);
+        }
+        deviationsHolder.append(figure);
+    }
+};
 
 async function showPasswordState() {
     try {
@@ -1057,6 +1225,9 @@ function connect() {
 showPasswordState();
 showResolution();
 showHistory();
+showComparison();
+// While a run is going the button carries its progress, so it is refreshed rather than left stale.
+setInterval(() => { if (compareButton.className === "picked") { showComparison(); } }, 15000);
 setView(everything);
 connect();
 </script>`;
@@ -1116,6 +1287,59 @@ async function main() {
         if (url.pathname === "/status") {
             response.writeHead(200, { "Content-Type": "application/json" });
             response.end(JSON.stringify(recorder.state));
+            return;
+        }
+        if (url.pathname === "/comparison") {
+            const send = (status: number, payload: Record<string, unknown>) => {
+                response.writeHead(status, { "Content-Type": "application/json" });
+                response.end(JSON.stringify(payload));
+            };
+            if (request.method !== "POST") {
+                send(200, recorder.comparisonState());
+                return;
+            }
+            void (async () => {
+                try {
+                    const parsed = JSON.parse(await readBody(request)) as { enabled?: unknown };
+                    send(200, parsed.enabled ? await recorder.startComparison() : recorder.stopComparison());
+                } catch (error) {
+                    send(400, { error: (error as Error).message });
+                }
+            })();
+            return;
+        }
+        if (url.pathname === "/comparisons") {
+            response.writeHead(200, { "Content-Type": "application/json" });
+            response.end(JSON.stringify({ runs: listRuns(COMPARISON_DIRECTORY) }));
+            return;
+        }
+        if (url.pathname.startsWith("/comparisons/")) {
+            // Only ever a single path segment, so a crafted name cannot walk out of the directory.
+            const rest = url.pathname.slice("/comparisons/".length).split("/");
+            const run = path.basename(decodeURIComponent(rest[0] ?? ""));
+            const directory = runDirectory(COMPARISON_DIRECTORY, run);
+            if (!run || !fs.existsSync(directory)) {
+                response.writeHead(404, { "Content-Type": "application/json" });
+                response.end(JSON.stringify({ error: "no such run" }));
+                return;
+            }
+            if (rest[1] === "frames" && rest[2]) {
+                const frame = path.join(directory, "frames", path.basename(decodeURIComponent(rest[2])));
+                if (!fs.existsSync(frame)) {
+                    response.writeHead(404).end("no such frame");
+                    return;
+                }
+                response.writeHead(200, { "Content-Type": "image/jpeg" });
+                fs.createReadStream(frame).pipe(response);
+                return;
+            }
+            try {
+                response.writeHead(200, { "Content-Type": "application/json" });
+                response.end(JSON.stringify(readRun(COMPARISON_DIRECTORY, run)));
+            } catch (error) {
+                response.writeHead(500, { "Content-Type": "application/json" });
+                response.end(JSON.stringify({ error: (error as Error).message }));
+            }
             return;
         }
         // The raw lines, for anything that wants to do its own arithmetic. They are small: a day of

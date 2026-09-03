@@ -202,8 +202,8 @@ export class LlamaAskClient {
         return body.tokens?.length ?? 0;
     }
 
-    private async request(image: RgbImage, prompt: string, maxNewTokens: number): Promise<ChatResponse> {
-        const budget = imageBudget();
+    private async request(image: RgbImage, prompt: string, maxNewTokens: number, override?: { width: number; height: number }): Promise<ChatResponse> {
+        const budget = override ?? imageBudget();
         const scaled = resizeToFit(image, budget.width, budget.height);
         const jpeg = encodeJpeg(scaled.rgb, scaled.width, scaled.height);
         const response = await fetch(`http://${HOST}:${PORT}/v1/chat/completions`, {
@@ -235,7 +235,8 @@ export class LlamaAskClient {
         return this.pending;
     }
 
-    async ask(image: RgbImage, prompt: string, maxNewTokens = DEFAULT_MAX_NEW_TOKENS): Promise<AskResult> {
+    /** The budget can be overridden per call, which is how one frame gets asked at two sizes. */
+    async ask(image: RgbImage, prompt: string, maxNewTokens = DEFAULT_MAX_NEW_TOKENS, budget?: { width: number; height: number }): Promise<AskResult> {
         if (this.pending) {
             throw new Error(`Expected only one question in flight at a time`);
         }
@@ -245,7 +246,7 @@ export class LlamaAskClient {
         this.pending = true;
         const startedAtMs = Date.now();
         try {
-            const body = await this.request(image, prompt, maxNewTokens);
+            const body = await this.request(image, prompt, maxNewTokens, budget);
             this.consecutiveFailures = 0;
             const timings = body.timings ?? {};
             const prefillMs = timings.prompt_ms ?? 0;
