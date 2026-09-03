@@ -56,6 +56,7 @@ not being able to.
     is the door open (door)
     is well lit (lit)
     head tilted back with hands on face (tilted)
+    brushing teeth with electric toothbrush (toothbrush)
 
 The answer is the words of the true ones and nothing else, so anything left out is a no. A still room
 costs about five output tokens rather than one per question, and generating was a third of a frame's

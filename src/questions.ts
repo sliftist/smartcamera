@@ -49,6 +49,7 @@ export const DEFAULT_PHRASES = [
     "is the door open (door)",
     "is well lit (lit)",
     "head tilted back with hands on face (tilted)",
+    "brushing teeth with electric toothbrush (toothbrush)",
 ];
 
 /** Named because smartpause watches exactly this one, so a reword here cannot orphan it there. */
