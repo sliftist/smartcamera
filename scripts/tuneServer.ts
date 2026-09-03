@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { spawn, ChildProcess } from "child_process";
-import { buildPrompt, DEFAULT_QUESTIONS } from "../src/questions";
+import { buildPrompt, DEFAULT_WATCHES } from "../src/questions";
 
 /**
  * Times one real question against one real frame under different llama.cpp settings.
@@ -89,7 +89,7 @@ async function measure(name: string, extra: string[]): Promise<void> {
             return;
         }
         const jpeg = fs.readFileSync(FRAME).toString("base64");
-        const prompt = buildPrompt(DEFAULT_QUESTIONS);
+        const prompt = buildPrompt(DEFAULT_WATCHES);
         // A text prompt of about the same length, to separate encoding the image from prefilling it.
         const filler = `${Array.from({ length: 860 }, (_, index) => `w${index}`).join(" ")}\n${prompt}`;
 

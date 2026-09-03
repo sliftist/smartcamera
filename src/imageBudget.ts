@@ -1,3 +1,6 @@
+import * as fs from "fs";
+import * as path from "path";
+
 /**
  * How large a frame the model is shown, and therefore what a frame costs.
  *
@@ -35,11 +38,36 @@ export const MIN_EDGE = 160;
 /** Above the camera's own 1920x1080 there is nothing to gain: it would be upscaling its own output. */
 export const MAX_EDGE = 1920;
 
-let width = Number(process.env.SMARTCAMERA_IMAGE_WIDTH || 1280);
-let height = Number(process.env.SMARTCAMERA_IMAGE_HEIGHT || 704);
+/**
+ * Remembered across restarts, unlike the question list.
+ *
+ * The two look similar and are not. A question is put there by something that is still running and
+ * will ask again; forgetting it is how the list stays honest. A resolution is a decision someone made
+ * about this camera, with nothing to re-make it, so losing it on a restart just silently undoes them.
+ */
+const SAVED = path.join(__dirname, "..", "state", "resolution.json");
+
+function saved(): { width: number; height: number } | undefined {
+    try {
+        const parsed = JSON.parse(fs.readFileSync(SAVED, "utf8")) as { width?: unknown; height?: unknown };
+        const width = Number(parsed.width);
+        const height = Number(parsed.height);
+        return within(width) && within(height) ? { width, height } : undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+const initial = saved();
+let width = initial?.width ?? Number(process.env.SMARTCAMERA_IMAGE_WIDTH || 1280);
+let height = initial?.height ?? Number(process.env.SMARTCAMERA_IMAGE_HEIGHT || 704);
 
 export function imageBudget(): { width: number; height: number } {
     return { width, height };
+}
+
+function within(edge: number): boolean {
+    return Number.isFinite(edge) && edge >= MIN_EDGE && edge <= MAX_EDGE;
 }
 
 /** Returns what it ended up as, so a caller sees the result rather than assuming it. */
@@ -49,11 +77,17 @@ export function setImageBudget(wantedWidth: number, wantedHeight: number): { wid
     }
     const rounded = [Math.round(wantedWidth), Math.round(wantedHeight)];
     for (const edge of rounded) {
-        if (edge < MIN_EDGE || edge > MAX_EDGE) {
+        if (!within(edge)) {
             throw new Error(`width and height must each be between ${MIN_EDGE} and ${MAX_EDGE}`);
         }
     }
     width = rounded[0];
     height = rounded[1];
+    try {
+        fs.mkdirSync(path.dirname(SAVED), { recursive: true });
+        fs.writeFileSync(SAVED, JSON.stringify(imageBudget()));
+    } catch {
+        // Not worth failing the change over. It applies now either way and only the memory is lost.
+    }
     return imageBudget();
 }

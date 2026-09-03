@@ -20,36 +20,37 @@ Closed questions do not have that problem. An answer means the same thing today 
 ago, a change is a flip rather than a rewording, and the reply is a few tokens no matter how much is
 going on in the room.
 
-    GET    /questions                                    -> { questions }
-    POST   /questions  {"question":"is anyone drinking"}  -> { questions }
-    DELETE /questions?question=is%20anyone%20drinking     -> { questions }
+    GET    /questions                                          -> { watches, questions, defaults }
+    POST   /questions {"question":"...","keyword":"phone"}       add, or rename an existing keyword
+    DELETE /questions?question=...                             remove
 
-    curl -X POST http://10.0.0.200:8772/questions \
-      -H 'Content-Type: application/json' -d '{"question":"is a hand on the mouse"}'
-
-A new question is asked of the next frame, about a second later. Up to 26 of them, one per letter,
-each at most 120 characters.
-
-The list is not kept on disk. A restart goes back to the defaults below, and anything else is there
-only because something asked for it and is still around to ask again. That is what stops the list
-growing forever: every experiment anyone ever ran would otherwise stay in the prompt, and each entry
-costs prompt and output tokens on every single frame. A client re-registers on connect anyway, so in
-practice a watcher that still exists puts its question straight back, within a second of a restart.
+Every watch is a question and a single word. The word is what the model answers with, and it is the
+caller's to choose. It can be left out: a built in question is looked up, so an older caller naming
+one needs to know nothing about keywords, and anything else gets a word derived from its own.
 
 The defaults, always asked and needing no registration. They cannot be removed: a DELETE naming one
-is accepted and changes nothing, and the page shows them filled in with no cross on them. Removing
-one could only mean it disappears until the next restart, which is worse than not being able to.
+is accepted and changes nothing, and the page shows them filled in with no cross. Removing one could
+only mean it disappears until the next restart, which is worse than not being able to.
 
-    is a person present
-    is anyone drinking
-    is a hand on the mouse
-    is anyone typing
-    is anyone eating
-    is anyone wearing headphones
-    is the door open
+    person      is a person present
+    drinking    is anyone drinking
+    mouse       is a hand on the mouse
+    typing      is anyone typing
+    eating      is anyone eating
+    headphones  is anyone wearing headphones
+    shirt       is wearing shirt
+    door        is the door open
+    lit         is well lit
+    tilted      head tilted back with hands on face
 
-They are lettered on the way in and the answer comes back as letters, which is why a round costs
-about 15 output tokens for seven questions. The letters never leave this process.
+The answer is the words of the true ones and nothing else, so anything left out is a no. A still room
+costs about five output tokens rather than one per question, and generating was a third of a frame's
+cost: this took a round from 1618ms to 1115ms.
+
+Words rather than letters on purpose. A letter is the same one token, but the model has to hold a
+lookup table in its head to use one, where drinking it can simply reason about. It also makes a
+wrong answer legible. A stray letter tells you nothing; a stray word tells you what it thought it
+saw, which is why words that were never offered are kept and shown on the row rather than dropped.
 
 ## Subscribing
 
