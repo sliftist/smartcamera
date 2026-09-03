@@ -10,6 +10,7 @@ import { AccessUnit, H264Depacketizer, isKeyframe, nalType, parseParameterSets, 
 import { decodeKeyframe, initializeDecoder, DecodedFrame } from "./src/decoder";
 import { StreamDecoder } from "./src/streamDecoder";
 import { resizeToFit, rotate180 } from "./src/overlay";
+import { imageBudget, setImageBudget } from "./src/imageBudget";
 import { AskBackend, createAskBackend } from "./src/askBackend";
 import { loadViews, View } from "./src/views";
 
@@ -43,13 +44,8 @@ const FRAME_DIRECTORY = path.join(__dirname, "frames");
 const KNOWN_FLAGS = new Set(["instant", "debug"]);
 const INDEX_PATTERN = /^\d+$/;
 const MAX_PROMPT_LENGTH = 2000;
-/**
- * What /frame hands out. Matching what the model is actually shown means a caller keeping frames for
- * review is looking at the same pixels the answer came from, and a full size jpeg costs about twice
- * as long to encode for detail that was never in front of the model.
- */
-const SERVED_FRAME_WIDTH = 1280;
-const SERVED_FRAME_HEIGHT = 704;
+// Whatever the model is currently being shown, so a frame kept for review is the pixels the answer
+// came from. Changing the resolution changes both together, because they are the same setting.
 const LOCAL_ADDRESSES = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
 function log(message: string) {
@@ -474,7 +470,8 @@ class Server {
             // blocks this loop for about 176ms against about 76ms for the smaller one, and that stall
             // is charged to reading the stream. Detail the model never saw is not worth a tear, and a
             // debug frame that matches what it was actually looking at is the more useful one anyway.
-            const scaled = resizeToFit(image, SERVED_FRAME_WIDTH, SERVED_FRAME_HEIGHT);
+            const budget = imageBudget();
+            const scaled = resizeToFit(image, budget.width, budget.height);
             await fs.promises.writeFile(file, encodeJpeg(scaled.rgb, scaled.width, scaled.height));
         } catch (error) {
             log(`could not write ${file}: ${(error as Error).message}`);
@@ -493,7 +490,8 @@ class Server {
             const timeout = new Promise<never>((_, fail) =>
                 setTimeout(() => fail(new Error(`No frame from ${this.views[index].name} within ${KEYFRAME_TIMEOUT_MS / 1000}s`)), KEYFRAME_TIMEOUT_MS));
             const captured = await Promise.race([watcher.nextImage(), timeout]);
-            const scaled = resizeToFit(captured.image, SERVED_FRAME_WIDTH, SERVED_FRAME_HEIGHT);
+            const budget = imageBudget();
+            const scaled = resizeToFit(captured.image, budget.width, budget.height);
             return encodeJpeg(scaled.rgb, scaled.width, scaled.height);
         } finally {
             watcher.removeDemand();
@@ -619,7 +617,24 @@ async function main() {
             try {
                 const url = new URL(request.url ?? "/", `http://${HOST}:${PORT}`);
                 if (url.pathname === "/status") {
-                    send(200, server.status());
+                    send(200, { ...server.status(), image: imageBudget() });
+                    return;
+                }
+                // Settable while it runs, because finding the right size is something you do by
+                // trying it against the actual room rather than by reasoning about it.
+                if (url.pathname === "/resolution") {
+                    if (request.method !== "POST") {
+                        send(200, imageBudget());
+                        return;
+                    }
+                    const parameters = await readParameters(request, url);
+                    try {
+                        const budget = setImageBudget(Number(parameters.width), Number(parameters.height));
+                        log(`the model is now shown frames that fit ${budget.width}x${budget.height}`);
+                        send(200, budget);
+                    } catch (error) {
+                        send(400, { error: (error as Error).message });
+                    }
                     return;
                 }
                 if (url.pathname === "/frame") {

@@ -77,6 +77,22 @@ type BufferedFrame = {
     jpeg: Buffer;
 };
 
+/** Reads a request body whole, for the handful of routes that take one. */
+function readBody(request: http.IncomingMessage): Promise<string> {
+    return new Promise((resolve, reject) => {
+        let body = "";
+        request.on("data", chunk => {
+            body += chunk;
+            if (body.length > 8192) {
+                request.destroy();
+                reject(new Error("the request body is too large"));
+            }
+        });
+        request.on("end", () => resolve(body));
+        request.on("error", reject);
+    });
+}
+
 /** An entry arrives, or the configuration around it changed and subscribers should refresh. */
 type Listener = (entry: Entry | undefined) => void;
 
@@ -437,7 +453,10 @@ td { border-top: 1px solid var(--line); padding: 7px 6px; vertical-align: top; }
        padding: 2px 4px 2px 11px; margin-right: 6px; }
               font-size: 15px; line-height: 1; border-radius: 999px; }
 .pin button:hover { opacity: 1; }
-#pin, #secret { display: inline-flex; gap: 6px; margin-bottom: 6px; }
+#pin, #secret, #res { display: inline-flex; gap: 6px; margin-bottom: 6px; }
+#res input { font: inherit; padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px;
+             background: none; color: inherit; min-width: 120px; }
+#resNote { margin-bottom: 16px; min-height: 1.2em; }
 #secret input { font: inherit; padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px;
                 background: none; color: inherit; min-width: 200px; }
 #secretNote { margin-bottom: 16px; min-height: 1.2em; }
@@ -461,6 +480,9 @@ tr.fresh { animation: in .35s ease-out; }
      in a cafe, and hiding it only buys a typo you cannot see. -->
 <form id="secret"><input id="secretValue" type="text" placeholder="leave empty to remove" autocomplete="off" spellcheck="false"><button type="submit">set</button></form>
 <div id="secretNote" class="quiet"></div>
+<h2>resolution shown to the model</h2>
+<form id="res"><input id="resValue" placeholder="1280x704" autocomplete="off" spellcheck="false"><button type="submit">set</button></form>
+<div id="resNote" class="quiet"></div>
 <h2>watched in every frame</h2>
 <div class="pins"><span id="interests"></span></div>
 <form id="pin"><input id="phrase" placeholder="e.g. hand on mouse" maxlength="120" autocomplete="off"><button type="submit">add</button></form>
@@ -543,6 +565,47 @@ document.getElementById("secret").onsubmit = async event => {
     field.value = "";
     note.textContent = reply.set ? "password set, and remembered in this browser" : "password removed";
     note.className = "saved";
+};
+
+// A frame is downscaled to fit inside this before the model sees it, and the aspect ratio is kept,
+// so 1280x704 against a 1920x1080 camera actually sends 1252x704. Cost goes with area: measured on
+// this camera, 1280x704 is about 1s a frame and 1920x1080 about 3.2s.
+async function showResolution(budget) {
+    const note = document.getElementById("resNote");
+    if (!budget) {
+        try {
+            budget = await (await api("/resolution")).json();
+        } catch (error) {
+            note.textContent = "could not reach eye2 to ask";
+            return;
+        }
+    }
+    if (budget.error) {
+        note.textContent = budget.error;
+        return;
+    }
+    document.getElementById("resValue").placeholder = budget.width + "x" + budget.height;
+    note.textContent = "frames are fitted inside " + budget.width + "x" + budget.height
+        + ", keeping the aspect ratio. smaller is faster, and costs detail.";
+    note.className = "quiet";
+}
+
+document.getElementById("res").onsubmit = async event => {
+    event.preventDefault();
+    const field = document.getElementById("resValue");
+    const note = document.getElementById("resNote");
+    const parts = /^\s*(\d+)\s*[x×,\s]\s*(\d+)\s*$/.exec(field.value);
+    if (!parts) {
+        note.textContent = "write it as width x height, e.g. 896x504";
+        return;
+    }
+    const reply = await (await api("/resolution", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ width: Number(parts[1]), height: Number(parts[2]) }),
+    })).json();
+    field.value = "";
+    await showResolution(reply);
 };
 
 async function showPasswordState() {
@@ -904,6 +967,7 @@ function connect() {
     socket.onerror = () => socket.close();
 }
 showPasswordState();
+showResolution();
 setView(everything);
 connect();
 </script>`;
@@ -963,6 +1027,28 @@ async function main() {
         if (url.pathname === "/status") {
             response.writeHead(200, { "Content-Type": "application/json" });
             response.end(JSON.stringify(recorder.state));
+            return;
+        }
+        // eye2 owns the setting and only listens on loopback, so this is the way to it from a phone.
+        if (url.pathname === "/resolution") {
+            void (async () => {
+                try {
+                    const forwarded = request.method === "POST"
+                        ? await fetch(`${EYE2_URL}/resolution`, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: await readBody(request),
+                            signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+                        })
+                        : await fetch(`${EYE2_URL}/resolution`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+                    const body = await forwarded.text();
+                    response.writeHead(forwarded.status, { "Content-Type": "application/json" });
+                    response.end(body);
+                } catch (error) {
+                    response.writeHead(502, { "Content-Type": "application/json" });
+                    response.end(JSON.stringify({ error: `eye2 is not answering: ${(error as Error).message}` }));
+                }
+            })();
             return;
         }
         if (url.pathname === "/password") {

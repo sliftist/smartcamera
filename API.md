@@ -103,6 +103,29 @@ The opening snapshot is what makes a file stand alone. Without it, replaying a d
 afternoon would apply its changes to an empty scene and get the wrong answer for everything that was
 already true at midnight.
 
+## Resolution
+
+A frame is downscaled to fit inside a budget before the model sees it, keeping the aspect ratio, so
+1280x704 against a 1920x1080 camera actually sends 1252x704. It is the single biggest lever on
+latency, because Qwen3-VL charges image tokens by area. Measured on this camera, cold:
+
+    1920x1080   2060 tokens   3235ms
+    1280x704     878 tokens    996ms
+    896x504      468 tokens    447ms
+    640x360      240 tokens    242ms
+
+1280x704 is the default. Change it from the page, or:
+
+    GET  /resolution                      -> { width, height }
+    POST /resolution {"width":896,"height":504}
+
+Each edge must be between 160 and 1920; above the camera own output there is nothing to gain. It
+takes effect on the very next frame, with no restart, which is the point: the right size is something
+you find by trying it against the actual room. It is not remembered across a restart.
+
+The same setting decides what /frames hands out, so a frame kept for review is the pixels the answer
+came from rather than a sharper version the model never saw.
+
 ## Who can connect
 
 Only the local network, checked before the password and before anything is served. The service binds

@@ -4,6 +4,7 @@ import { spawn, ChildProcess } from "child_process";
 import { RgbImage } from "./yolo";
 import { encodeJpeg } from "./jpeg";
 import { resizeToFit } from "./overlay";
+import { imageBudget } from "./imageBudget";
 import { AskResult } from "./askClient";
 
 const READY_TIMEOUT_MS = 300_000;
@@ -30,12 +31,6 @@ const FAILURES_BEFORE_RESTART = 2;
 const KILL_GRACE_MS = 5_000;
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.SMARTCAMERA_LLAMA_PORT || 8771);
-/**
- * Qwen3-VL charges image tokens by area, so the frame is shrunk before it is ever encoded. This is the
- * same budget the TensorRT path used, and it is already finer than the camera's optics resolve.
- */
-const DEFAULT_IMAGE_WIDTH = 1280;
-const DEFAULT_IMAGE_HEIGHT = 704;
 const CONTEXT_TOKENS = Number(process.env.SMARTCAMERA_CONTEXT || 8192);
 const DEFAULT_MAX_NEW_TOKENS = 48;
 /** Every layer offloaded. The point of this backend is that nothing runs on the cpu. */
@@ -45,14 +40,6 @@ const MODEL_DIRECTORY = path.join(__dirname, "..", "models");
 const SERVER_LOG = path.join(__dirname, "..", "logs", "llama-server.log");
 const DEFAULT_MODEL = "Qwen3-VL-8B-Instruct-Q8_0.gguf";
 const DEFAULT_PROJECTOR = "mmproj-F16.gguf";
-
-/** Read per call rather than once, so a sweep can change the budget between runs in one process. */
-function imageBudget(): { width: number; height: number } {
-    return {
-        width: Number(process.env.SMARTCAMERA_IMAGE_WIDTH || DEFAULT_IMAGE_WIDTH),
-        height: Number(process.env.SMARTCAMERA_IMAGE_HEIGHT || DEFAULT_IMAGE_HEIGHT),
-    };
-}
 
 function modelFile(): string {
     const configured = process.env.SMARTCAMERA_MODEL || DEFAULT_MODEL;
