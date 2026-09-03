@@ -227,8 +227,8 @@ If it is not there, smartpause says so every five seconds and waits, naming the 
 rather than starting up and failing quietly. Only the trailing newline an editor adds is stripped;
 anything else in the file, spaces included, is part of the password.
 
-Coming back takes effect at once, since waiting to resume is the annoying direction. Going away waits
-three seconds, roughly two answers, because one bad answer should not stop your music.
+Both directions take effect on the first answer that says so, with nothing waiting on a second
+opinion.
 
 ## History
 

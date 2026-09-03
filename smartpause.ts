@@ -28,11 +28,6 @@ const PHRASE = HEADPHONES_QUESTION;
  */
 const PASSWORD_FILE = path.join(os.homedir(), "smartcamerapassword.txt");
 const PASSWORD_POLL_MS = 5000;
-/**
- * How long the headphones have to stay off before anything is paused. Answers land about every 1.4s,
- * so this is roughly two of them, and it exists because one bad answer should not stop your music.
- */
-const PAUSE_AFTER_MS = 3000;
 /** Once Windows says nothing is playing, wait before asking it again rather than spawning powershell. */
 const RETRY_PAUSE_MS = 30 * 1000;
 
@@ -60,26 +55,14 @@ async function readPassword(): Promise<string> {
 class Pauser {
     /** Non empty exactly when we are the reason something is paused. */
     private paused: string[] = [];
-    private pending: ReturnType<typeof setTimeout> | undefined;
     private nothingPlayingAtMs = 0;
 
-    /** The headphones came off. Nothing happens yet, in case they go back on. */
-    off() {
-        if (this.pending) {
-            return;
-        }
-        this.pending = setTimeout(() => {
-            this.pending = undefined;
-            void this.pause();
-        }, PAUSE_AFTER_MS);
+    /** The headphones came off. Both directions act at once; waiting was never worth what it cost. */
+    async off() {
+        await this.pause();
     }
 
-    /** The headphones went back on. Coming back takes effect at once: waiting is what would annoy. */
     async on() {
-        if (this.pending) {
-            clearTimeout(this.pending);
-            this.pending = undefined;
-        }
         if (this.paused.length === 0) {
             this.nothingPlayingAtMs = 0;
             return;
@@ -133,7 +116,7 @@ async function main() {
         onError: error => log(`${error.message}`),
     }).watch(PHRASE, {
         onStart: () => { void pauser.on(); },
-        onStop: () => pauser.off(),
+        onStop: () => { void pauser.off(); },
     });
 }
 
