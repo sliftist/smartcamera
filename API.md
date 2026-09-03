@@ -65,6 +65,35 @@ An entry:
 the model. A question it skipped keeps its last answer rather than flapping to no and back, and is
 listed in `unanswered` so a caller can tell the difference between "no" and "did not say".
 
+## The log
+
+One file a day under `actions/`, holding only what cannot be worked out again. Each file opens with
+the state the day began in and everything after it is a change:
+
+    {"at":1788408519000,"state":["is a person present","is anyone typing"]}
+    {"at":1788408521269,"removed":["is a hand on the mouse"]}
+    {"at":1788408533419,"added":["is anyone typing"]}
+
+A round where nothing flipped writes nothing at all, which is most of them. Times are plain
+milliseconds since the epoch. Timings and token counts are not written: they describe the run rather
+than the room, they were the bulk of a line, and nothing reads them back. A round recovered from a
+file therefore has no timings, and the page leaves that column blank for it rather than showing a
+confident zero.
+
+That took a line from about 311 bytes to about 61, and stopped writing the roughly 70,000 identical
+rounds a day where nothing happened.
+
+The opening snapshot is what makes a file stand alone. Without it, replaying a day that began mid
+afternoon would apply its changes to an empty scene and get the wrong answer for everything that was
+already true at midnight.
+
+## Who can connect
+
+Only the local network, checked before the password and before anything is served. The service binds
+every interface so it can be read from a phone, which means a port forward or a careless router is
+all that stands between it and the internet. A connection from outside 10/8, 192.168/16, 172.16/12,
+169.254/16, loopback, or their ipv6 equivalents is refused whatever password it offers.
+
 ## Reading it another way
 
     GET /status                     rounds, failures, the questions, which are yes, the live prompt

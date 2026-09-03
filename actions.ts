@@ -6,6 +6,7 @@ import { formatDateTime } from "socket-function/src/formatting/format";
 import { dayStamp, millisecondStamp } from "./src/timestamps";
 import { buildPrompt, parseAnswers, diffAnswers, letterFor, normalizeQuestion, MAX_QUESTIONS, MAX_QUESTION_LENGTH } from "./src/questions";
 import { readPassword, writePassword, passwordMatches, offeredPassword } from "./src/password";
+import { isLocalAddress } from "./src/network";
 
 const EYE2_URL = "http://127.0.0.1:8770";
 const PORT = 8772;
@@ -55,19 +56,21 @@ type Entry = {
     /** Questions whose answer flipped since the round before. */
     added: string[];
     removed: string[];
+    // Everything below describes the run rather than the room. It is sent live and never written
+    // down, so a round recovered from disk has none of it.
     /** Questions the model did not answer at all, which are neither yes nor no. */
-    unanswered: string[];
+    unanswered?: string[];
     /** Exactly what the model said, so a parsing decision can always be second guessed later. */
-    raw: string;
-    promptTokens: number;
-    outputTokens: number;
+    raw?: string;
+    promptTokens?: number;
+    outputTokens?: number;
     /** Decoding the frame, which is the only part that is not the model. */
-    decodeMs: number;
+    decodeMs?: number;
     /** Reading the image and the prompt, which is where nearly all of a round goes. */
-    prefillMs: number;
+    prefillMs?: number;
     /** Writing the answer, which is why letters are cheaper than phrases. */
-    generateMs: number;
-    analyzeMs: number;
+    generateMs?: number;
+    analyzeMs?: number;
 };
 
 type BufferedFrame = {
@@ -165,19 +168,29 @@ class Recorder {
             return;
         }
         const lines = fs.readFileSync(file, "utf8").split("\n").filter(line => line.trim());
+        // Replayed rather than read, since only changes were written. The first line is the state the
+        // day opened in and everything after it is a change to that.
+        let state: string[] = [];
         for (const line of lines) {
             try {
-                const entry = JSON.parse(line) as Entry;
-                this.recent.push(entry);
-                // Only answers to questions still being asked carry over; the rest were about
-                // questions that have since been removed or reworded.
-                this.yes = (entry.state ?? []).filter(question => this.questions.includes(question));
+                const logged = JSON.parse(line) as { at: number; state?: string[]; added?: string[]; removed?: string[] };
+                const added = logged.added ?? [];
+                const removed = logged.removed ?? [];
+                state = logged.state
+                    ? [...logged.state]
+                    : [...state.filter(item => !removed.includes(item)), ...added.filter(item => !state.includes(item))];
+                // Timings are not on disk, so a recovered round has none and the page leaves that
+                // column out for it rather than showing a confident zero.
+                this.recent.push({ at: logged.at, state: [...state], added, removed });
             } catch {
                 // A half written last line is expected after a hard stop, and is not worth a complaint.
             }
         }
         this.recent = this.recent.slice(-RECENT_LIMIT);
-        log(`recovered ${lines.length} rounds from today, ${this.yes.length} answered yes`);
+        // Only answers to questions still being asked carry over; the rest were about questions that
+        // have since been removed or reworded.
+        this.yes = state.filter(question => this.questions.includes(question));
+        log(`recovered ${lines.length} lines from today, ${this.yes.length} currently true`);
     }
 
     /**
@@ -260,14 +273,37 @@ class Recorder {
         return () => this.listeners.delete(listener);
     }
 
+    /**
+     * A day per file, and only what cannot be worked out again.
+     *
+     * A round is almost always identical to the one before it, so writing the whole state every time
+     * wrote the same list a thousand times an hour. Only changes go down, and a round where nothing
+     * flipped writes nothing at all, which is most of them.
+     *
+     * Each file opens with the full state so it stands alone. Without that, replaying a day that
+     * began mid-afternoon would apply its changes to an empty scene and get the wrong answer for
+     * everything that was already true at midnight.
+     *
+     * Timings and token counts are not written. They describe the run rather than the room, they are
+     * the bulk of a line, and nothing reads them back.
+     */
     private append(entry: Entry) {
         const today = dayStamp(entry.at);
         if (today !== this.day) {
             this.stream?.end();
             this.stream = fs.createWriteStream(path.join(LOG_DIRECTORY, `${today}.jsonl`), { flags: "a" });
             this.day = today;
+            this.stream.write(JSON.stringify({ at: entry.at, state: entry.state }) + "\n");
+        } else if (entry.added.length > 0 || entry.removed.length > 0) {
+            const line: { at: number; added?: string[]; removed?: string[] } = { at: entry.at };
+            if (entry.added.length > 0) {
+                line.added = entry.added;
+            }
+            if (entry.removed.length > 0) {
+                line.removed = entry.removed;
+            }
+            this.stream?.write(JSON.stringify(line) + "\n");
         }
-        this.stream?.write(JSON.stringify(entry) + "\n");
         this.recent.push(entry);
         if (this.recent.length > RECENT_LIMIT) {
             this.recent.shift();
@@ -333,7 +369,7 @@ class Recorder {
 
         // Only the flips are logged. A round where nothing changed is one line saying so.
         const change = [...added.map(item => `+ ${item}`), ...removed.map(item => `- ${item}`)];
-        log(`${entry.outputTokens} out tok, ${entry.analyzeMs.toFixed(0)}ms`
+        log(`${entry.outputTokens} out tok, ${(entry.analyzeMs ?? 0).toFixed(0)}ms`
             + ` | ${change.join(" | ") || "no change"}`
             + ` | ${entry.state.length}/${this.questions.length} yes`
             + `${unanswered.length > 0 ? `, ${unanswered.length} unanswered` : ""}`);
@@ -762,14 +798,18 @@ function row(entry) {
     }
     const cost = document.createElement("td");
     cost.className = "cost";
-    cost.textContent = Math.round(entry.analyzeMs + entry.decodeMs) + " ms";
-    const detail = document.createElement("div");
-    detail.className = "breakdown";
-    // Where a round actually goes. Prefill is reading the image and the prompt, and dwarfs the rest.
-    detail.textContent = "decode " + Math.round(entry.decodeMs)
-        + " | in " + Math.round(entry.prefillMs) + " (" + entry.promptTokens + " tok)"
-        + " | out " + Math.round(entry.generateMs) + " (" + entry.outputTokens + " tok)";
-    cost.append(document.createElement("br"), detail);
+    // Timings are never written down, so a round recovered from a log file has none. Left blank
+    // rather than shown as a confident zero.
+    if (typeof entry.analyzeMs === "number") {
+        cost.textContent = Math.round(entry.analyzeMs + (entry.decodeMs || 0)) + " ms";
+        const detail = document.createElement("div");
+        detail.className = "breakdown";
+        // Where a round actually goes. Prefill is reading the image and the prompt, and dwarfs the rest.
+        detail.textContent = "decode " + Math.round(entry.decodeMs || 0)
+            + " | in " + Math.round(entry.prefillMs || 0) + " (" + entry.promptTokens + " tok)"
+            + " | out " + Math.round(entry.generateMs || 0) + " (" + entry.outputTokens + " tok)";
+        cost.append(document.createElement("br"), detail);
+    }
     tr.append(when, what, cost);
     return tr;
 }
@@ -903,6 +943,14 @@ async function main() {
 
     const server = http.createServer((request, response) => {
         const url = new URL(request.url ?? "/", `http://${HOST}:${PORT}`);
+        // Before anything else, including the page. Somebody outside the network gets nothing at all,
+        // so a forwarded port exposes nothing rather than exposing a login.
+        if (!isLocalAddress(request.socket.remoteAddress)) {
+            log(`refused ${request.socket.remoteAddress}, which is not on this network`);
+            response.writeHead(403, { "Content-Type": "application/json" });
+            response.end(JSON.stringify({ error: "Only the local network may connect" }));
+            return;
+        }
         // The page itself is served to anyone, because it is the thing that asks for the password.
         // Gating it meant a browser with no password got a 401 body of json and no way to get past
         // it: there was nothing loaded to do the asking. The page holds no camera data of its own,
@@ -1049,6 +1097,10 @@ async function main() {
         // Checked at the handshake, so an unauthorised socket is never established rather than being
         // established and then policed.
         verifyClient: ({ req }, done) => {
+            if (!isLocalAddress(req.socket.remoteAddress)) {
+                done(false, 403, "Only the local network may connect");
+                return;
+            }
             const url = new URL(req.url ?? "/", `http://${HOST}:${PORT}`);
             done(authorised(req, url), 401, "A password is required");
         },

@@ -43,7 +43,7 @@
         "ask2": "typenode ./scripts/eye2Ask.ts",
         "ask2:concurrent": "typenode ./scripts/eye2Concurrent.ts",
         "ask2:security": "typenode ./scripts/eye2Security.ts",
-        "smartpause": "typenode ./smartpause.ts 2",
+        "smartpause": "typenode ./smartpause.ts --url http://10.0.0.200:8772",
         "autopause": "typenode ./autopause.ts %USERPROFILE%/Desktop/view2.bat",
         "bench:quant": "typenode ./scripts/benchQuant.ts",
         "watch": "typenode ./scripts/watch.ts",
