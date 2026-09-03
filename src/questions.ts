@@ -27,7 +27,9 @@ export const DEFAULT_QUESTIONS = [
     "is anyone typing",
     "is anyone eating",
     "is anyone wearing headphones",
+    "is wearing shirt",
     "is the door open",
+    "is well lit",
 ];
 
 const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
