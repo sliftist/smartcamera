@@ -1,0 +1,31 @@
+---
+description: DiskCollection usage and patterns
+alwaysApply: true
+---
+
+# DiskCollection
+
+If you read an object from a collection, and then mutate it, and want to set it in the collection, you have to shallow copy it, so the `DiskCollection` picks up the change.
+
+```typescript
+let x = collection.get("x");
+x.y = Math.random();
+// Not asynchronous, as sets are synchronous
+collection.set("x", { ...x });
+```
+
+The non-async functions should be called in render functions, the async functions should be called in event handlers, etc. Except for `.set`, which should be called in both cases.
+
+```typescript
+get(key: string): T | undefined;
+async getPromise(key: string): Promise<T | undefined>;
+set(key: string, value: T): void;
+remove(key: string): void;
+getKeys(): string[];
+getKeysPromise(): Promise<string[]>;
+getEntries(): [string, T][];
+getValues(): T[];
+async getValuesPromise(): Promise<T[]>;
+getInfo(key: string);
+async reset();
+```

@@ -1,0 +1,44 @@
+---
+description: Custom components and input handling
+alwaysApply: true
+---
+
+# Components
+
+## Anchor
+
+`Anchor` (`<a>` tag), for linking using `URLParam`:
+```tsx
+<Anchor
+    params={[[todolistURL, listKey]]}
+>
+    {list.name}
+</Anchor>
+```
+
+`URLParam`, Parameters which are stored in the URL. The second argument is the default, which can be a number, string, or an object. Set and get with `.value`.
+```typescript
+const todolistURL = new URLParam("todolist", "");
+```
+
+## InputLabel
+
+`InputLabel` and `InputLabelURL` should be used for inputs. For example:
+
+```tsx
+<InputLabelURL
+    label="Show Previous Video"
+    checkbox
+    persisted={showPreviousVideoURL}
+/>
+<InputLabel
+    label="Notes"
+    fillWidth
+    value={node.notes || ""}
+    onChangeValue={async (value) => {
+        const updatedNode = deepCloneJSON(node);
+        updatedNode.notes = value;
+        await VideoNode.set(node.id, updatedNode);
+    }}
+/>
+```

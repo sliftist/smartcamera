@@ -1,0 +1,33 @@
+---
+description: MobX state management and component structure
+alwaysApply: true
+---
+
+# MobX State Management
+
+We use MobX for state management. Components should use a variable called `synced` that is an observable for their state, and never `Component.state`. All components need the `@observer` decorator.
+
+For example:
+
+```tsx
+import preact from "preact";
+import { observable } from "mobx";
+
+@observer
+class Example extends preact.Component {
+    synced = observable({
+        x: 0,
+    });
+
+    render() {
+        return <div>
+            <button onClick={() => this.synced.x++}>
+                Click me
+            </button>
+            <p>
+                {this.synced.x}
+            </p>
+        </div>;
+    }
+}
+```

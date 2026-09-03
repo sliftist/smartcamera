@@ -1,0 +1,11 @@
+---
+description: General project guidelines and tool usage
+alwaysApply: true
+---
+
+# General Guidelines
+
+- The code automatically updates on save, so do not ever run commands to rerun the site.
+- Don't run shell commands when you need to create or move small code files. You should use tool calls to do this. You should also use tool calls to make files within folders. You don't need to make the folder, just make the file. The folder will automatically be created.
+- If you need to add a dependency, don't just change the package.json file. Properly use `yarn add` so you get the latest version, unless the user specifies a version or tells you otherwise.
+- Use tool calls to read files and directories where possible, instead of running "ls", "dir", etc.

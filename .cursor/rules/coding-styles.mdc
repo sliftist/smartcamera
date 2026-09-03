@@ -1,0 +1,50 @@
+---
+description: General coding styles and conventions
+alwaysApply: true
+---
+
+# Coding Styles
+
+- Times should almost always be in milliseconds, and if not told, you should assume a time is in milliseconds.
+- Don't make functions that will never be reused and are short. This just makes the code too confusing. If the function is under five lines and it's not being reused, you shouldn't create it, unless instructed explicitly to create it.
+- Comments should be used sparingly and only if it's required to explain what's being done. If you're calling a function called `createImageName` and the comment is called "create imageName", you will be fired because that's just stupid. It's a waste of lines.
+- Comments go in the line before, never after the semicolon.
+- Try not to use `null`, and instead always use `undefined`.
+- Almost never check for `undefined` or `null`, just check for falsey.
+- When functions have more than one primitive parameter, such that you could confuse them (even something as simple as start time and end time), you should put them inside of an object and call that object `config`, so the function only has a single parameter.
+- Never use return codes, always prefer to throw on error. Include a lot of context information in the error. If any values might be extremely large, such as parsing a file, limit them (ex, to 500 characters).
+- Use double quotes, not single quotes.
+- Never use the ternary operator. Instead, do this: `x ? y : z` => `x && y || z`.
+- Never use non-null assertion operator, instead check the value, and if necessary (because it is accessed in nested functions), use a `const` variable to preserve the type.
+- Errors should almost always use a template string to include the expected value, and the actual value, as in: `throw new Error(\`Expected X, was \${Y}\`);`
+- Don't use switch statements. Use if/else statements instead.
+- Don't use `!` when accessing a value from a map. Use the get / if undefined initialize and set, and then use style. It's faster, and more type safe.
+- Sort with this function, which takes a single function to map each object to a sortable value:
+  ```typescript
+  import { sort } from "socket-function/src/misc";
+  export function sort<T>(arr: T[], sortKey: (obj: T) => unknown);
+  ```
+- Prefer to return, instead of using else statements. Handle error cases, warn/throw, and then return. Your main case should be below, not in an if statement, just in the main code.
+- Use template strings for error messages, which include the exact value that triggered the error, and the exact expectation it failed.
+- Use functions to prevent code duplication only when something is actually duplicated.
+- Don't recreate collections or URL parameters, import them instead.
+- Do not redefine types. Import the types correctly.
+- Do not use types when they can be inferred.
+- Constants that are arbitrary and that we might to reconfigure should be near the top of the file under the imports, not buried within functions.
+- Never use environment variables. All configuration should be on the disk, or, if specific to a current run, passed as command line parameters.
+- Never use inline styles, always use the CSS helper.
+- Don't use `as any`.
+- When you're making fetch calls and you get a type of `any`, you need to cast it to the actual type, and not leave it as `any`. The same goes for when you're deserializing values.
+- DO NOT redeclare constants and copy their value. JUST IMPORT THEM!
+- DO NOT redeclare types. JUST IMPORT THEM!
+- Do not try catch for no reason. If you can't actually handle the exception, just let it throw.
+- For input events, always use `event.currentTarget`.
+- Use `ref={elem => }` callbacks. NEVER use `.createRef`.
+- NEVER render images with a fixed width+height. This will cause them to be stretched or cut off. This is terrible. Only set the width or height.
+- Callback held should be avoided by using async and `import { PromiseObj } from "socket-function/src/misc";`. Most of the time, if there's an event callback, you should wrap it with a promise obj so that you can wait for it asynchronously.
+- `import { keyBy, keyByArray } from "socket-function/src/misc";` Should be used when you need to create lookups from lists and you know what key you want. This can clobber values, or it can gather in an array.
+  ```typescript
+  let example: Map<number, { x: number }> = keyBy([{ x: 5 }, { x: 6 }]);
+  let example: Map<number, { x: number }[]> = keyByArray([{ x: 5 }, { x: 5, version: 2 }, { x: 6 }]);
+  ```
+- Never use `alert`. If there's an error, you should throw it.

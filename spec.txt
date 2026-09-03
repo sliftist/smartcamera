@@ -1,0 +1,5 @@
+- Add the door camera 
+    - Make sure it doesn't lag it too much. If it does, we might want to have a different API to just get some keyframes or some frames. Should be easy for the door camera to just spit out some frames instead of video. 
+- Actually, record at least the frames for the past day with UI to look through them and see all of the requests and the responses. 
+- Allow looking through the UI by time, marking stuff as false positives or false negatives, and allow requesting the server to rerun analysis with a different prompt. 
+    - And then maybe even rerun it for all the false positives and negatives. I guess we have to categorize them as well. This should allow us to really determine the best prompts for a whole bunch of images. 

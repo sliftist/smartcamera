@@ -1,0 +1,16 @@
+---
+description: API calls and controller usage
+alwaysApply: true
+---
+
+# API Calls
+
+When in an event callback (which must be async):
+```typescript
+APIController(getExtNodeId()).getModels.promise()
+```
+
+When in a render function/context:
+```typescript
+APIController(getExtNodeId()).getModels()
+```
