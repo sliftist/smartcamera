@@ -19,16 +19,13 @@ import * as path from "path";
  * Deliberately a short fixed list. This is for one pass over the archive by one person, so the value
  * is in every clip being judged against the same few questions, not in the vocabulary being rich.
  *
- * `implies` is what makes one label a subset of another: a delivery to a neighbour is still a
+ * `implies` is what makes one label a subset of another: a delivery to a neighbor is still a
  * delivery, so choosing it selects the broader one too and clearing the broader one clears it. That
  * relationship lives here rather than in the page, since it is a fact about the labels themselves.
  */
 export const LABELS: { key: string; name: string; implies?: string }[] = [
     { key: "delivery", name: "package delivery" },
-    { key: "neighbour", name: "package delivery to neighbour", implies: "delivery" },
-    { key: "door", name: "at my door" },
-    { key: "passing", name: "passing by" },
-    { key: "nothing", name: "nothing" },
+    { key: "neighbor", name: "package delivery to neighbor", implies: "delivery" },
 ];
 
 export const LABEL_KEYS = new Set(LABELS.map(label => label.key));
