@@ -178,14 +178,15 @@ button.plain:hover { border-color: #aaa; }
 <div id="numbers"></div>
 <div id="stage">
   <div class="stack">
-    <video id="videoA" loop muted playsinline controls preload="auto"></video>
-    <video id="videoB" class="standby" loop muted playsinline controls preload="auto"></video>
+    <video id="videoA" loop muted playsinline controls preload="auto" tabindex="-1"></video>
+    <video id="videoB" class="standby" loop muted playsinline controls preload="auto" tabindex="-1"></video>
   </div>
   <div id="side">
     <div id="choices"></div>
     <div id="state"></div>
     <div id="nav">
       <button class="plain" id="prev">back</button>
+      <button class="plain" id="next">forward</button>
       <button class="plain" id="unreview">un-review</button>
       <button class="plain" id="mode">showing unreviewed</button>
     </div>
@@ -196,19 +197,69 @@ button.plain:hover { border-color: #aaa; }
 <script>
 const LABELS = __LABELS__;
 let clips = [];
-let at = 0;
+/**
+ * The clip on screen, by its own id rather than a position in a list.
+ *
+ * A position was the wrong thing to hold. In unreviewed mode answering a clip takes it out of the
+ * list, so the next one slides into the same index and the index never moves. Back, which stepped
+ * that index down, therefore did nothing at all: it was always already at the start.
+ */
+let viewingT = 0;
+/** Clips actually visited, most recent last. What back walks, so it can return to a reviewed one. */
+let trail = [];
 let unreviewedOnly = true;
 
 const choicesHolder = document.getElementById("choices");
 const savedNote = document.getElementById("saved");
 
-/**
- * Two players, one showing and one loading the clip that comes next.
- *
- * Swapped rather than reused. Pointing one player at a new file throws away everything it had
- * buffered and starts again, which is the pause you feel between clips. Handing over to a player
- * that already has the file, and already sits at the right moment in it, makes moving on immediate.
- */
+/** The clips still wanting an answer, which is what moving forward walks through. */
+function queue() {
+    return unreviewedOnly ? clips.filter(clip => !clip.reviewed) : clips;
+}
+/** Looked up across everything, so going back can show a clip the queue has since dropped. */
+function viewing() {
+    return clips.find(clip => clip.t === viewingT);
+}
+/** The next clip still wanting an answer, by time rather than by index. */
+function nextAfter(t) {
+    const list = queue();
+    return list.find(clip => clip.t > t) || list.find(clip => clip.t !== t) || undefined;
+}
+
+function goTo(clip, remember) {
+    if (!clip) {
+        return;
+    }
+    if (remember && viewingT && viewingT !== clip.t) {
+        trail.push(viewingT);
+        // Only far enough back to undo a wrong turn. Keeping every step would let back wander for an
+        // afternoon, which is not what anyone means by it.
+        if (trail.length > 200) {
+            trail.shift();
+        }
+    }
+    viewingT = clip.t;
+    render();
+}
+
+function back() {
+    while (trail.length > 0) {
+        const previous = trail.pop();
+        const clip = clips.find(item => item.t === previous);
+        if (clip && clip.t !== viewingT) {
+            viewingT = clip.t;
+            render();
+            return;
+        }
+    }
+    // Nowhere visited yet, so step back through everything in time instead of doing nothing.
+    const all = clips.filter(clip => clip.t < viewingT);
+    if (all.length > 0) {
+        viewingT = all[all.length - 1].t;
+        render();
+    }
+}
+
 const players = [document.getElementById("videoA"), document.getElementById("videoB")];
 let liveAt = 0;
 const live = () => players[liveAt];
@@ -248,12 +299,18 @@ function point(video, clip) {
     toMiddle(video);
 }
 
+/**
+ * Two players, one showing and one loading the clip that comes next.
+ *
+ * Swapped rather than reused. Pointing one player at a new file throws away everything it had
+ * buffered and starts again, which is the pause you feel between clips. Handing over to a player
+ * that already has the file, and already sits at the right moment in it, makes moving on immediate.
+ */
 function showClip(clip) {
     const wanted = sourceFor(clip);
     if (live().src.endsWith(wanted)) {
         // Already on screen. A re-render after a keystroke must not restart what is playing.
     } else if (standby().src.endsWith(wanted)) {
-        // The one that was loading is the one wanted, so just trade places.
         live().pause();
         live().classList.add("standby");
         liveAt = 1 - liveAt;
@@ -263,20 +320,11 @@ function showClip(clip) {
         point(live(), clip);
         live().play().catch(() => { /* as above */ });
     }
-    // Whatever is now standing by gets the clip after this one.
-    const list = shown();
-    const next = list[at + 1];
-    if (next && !standby().src.endsWith(sourceFor(next))) {
+    const next = nextAfter(clip.t);
+    if (next && next.t !== clip.t && !standby().src.endsWith(sourceFor(next))) {
         point(standby(), next);
         standby().pause();
     }
-}
-
-function shown() {
-    return unreviewedOnly ? clips.filter(clip => !clip.reviewed) : clips;
-}
-function current() {
-    return shown()[at];
 }
 
 /**
@@ -285,8 +333,7 @@ function current() {
  * clip and not merely the same place in a list that has since shifted underneath it.
  */
 function remember() {
-    const clip = current();
-    const query = (clip ? "?clip=" + clip.t : "?") + (unreviewedOnly ? "" : "&all=1");
+    const query = (viewingT ? "?clip=" + viewingT : "?") + (unreviewedOnly ? "" : "&all=1");
     history.replaceState(null, "", query);
 }
 
@@ -295,20 +342,12 @@ function restore() {
     unreviewedOnly = params.get("all") !== "1";
     document.getElementById("mode").textContent = unreviewedOnly ? "showing unreviewed" : "showing everything";
     const wanted = Number(params.get("clip"));
-    if (!wanted) {
-        at = 0;
+    if (wanted && clips.some(clip => clip.t === wanted)) {
+        viewingT = wanted;
         return;
     }
-    const list = shown();
-    const exact = list.findIndex(clip => clip.t === wanted);
-    if (exact >= 0) {
-        at = exact;
-        return;
-    }
-    // It was reviewed and has left this list, so land on the next clip in time rather than at the
-    // top. Coming back to the beginning after a reload would be the single most annoying thing here.
-    const after = list.findIndex(clip => clip.t > wanted);
-    at = after >= 0 ? after : Math.max(0, list.length - 1);
+    const list = queue();
+    viewingT = list.length > 0 ? list[0].t : (clips.length > 0 ? clips[clips.length - 1].t : 0);
 }
 
 async function load() {
@@ -318,17 +357,23 @@ async function load() {
 }
 
 function render() {
-    const list = shown();
-    const clip = list[at];
+    const clip = viewing();
+    const list = queue();
     document.getElementById("done").hidden = !!clip;
     document.getElementById("stage").hidden = !clip;
 
     const reviewed = clips.filter(item => item.reviewed).length;
     const remaining = clips.length - reviewed;
     document.getElementById("allfill").style.width = (clips.length ? (reviewed / clips.length) * 100 : 0) + "%";
+
+    const place = clip ? list.findIndex(item => item.t === clip.t) : -1;
     document.getElementById("fill").style.width =
-        (list.length ? ((clip ? at : list.length) / list.length) * 100 : 100) + "%";
-    document.getElementById("place").textContent = clip ? (at + 1) + " of " + list.length : "";
+        (clips.length ? (clips.filter(item => item.t <= viewingT).length / clips.length) * 100 : 100) + "%";
+    document.getElementById("place").textContent = !clip ? ""
+        : place >= 0 ? (place + 1) + " of " + list.length
+        // Reviewed already, so it is not in the queue and has no place in it. Saying which number it
+        // is would be a lie, and saying nothing would look like the counter had broken.
+        : "revisiting";
 
     const counts = new Map();
     for (const item of clips) {
@@ -396,7 +441,7 @@ function render() {
         : "not reviewed yet";
     document.getElementById("keys").innerHTML =
         "<b>1</b>&ndash;<b>" + LABELS.length + "</b> label &nbsp; <b>space</b> none of these"
-        + " &nbsp; <b>&larr;</b> back &nbsp; <b>0</b> un-review";
+        + " &nbsp; <b>&larr;</b> back &nbsp; <b>&rarr;</b> forward &nbsp; <b>0</b> un-review";
 }
 
 /**
@@ -404,7 +449,7 @@ function render() {
  * something off is a correction rather than a judgement and the clip is still on screen.
  */
 async function choose(key) {
-    const clip = current();
+    const clip = viewing();
     if (!clip) {
         return;
     }
@@ -429,7 +474,7 @@ async function choose(key) {
 
 /** Nothing applied. A real answer, recorded like any other, and the clip does not come back. */
 async function nothing() {
-    const clip = current();
+    const clip = viewing();
     if (!clip) {
         return;
     }
@@ -449,9 +494,9 @@ async function save(clip, wanted) {
     setTimeout(() => { savedNote.textContent = ""; }, 900);
 }
 
-/** Puts it back in the queue. The only way a reviewed clip is ever shown again. */
+/** Puts it back in the queue. The only way a reviewed clip is ever offered again on its own. */
 async function unreview() {
-    const clip = current();
+    const clip = viewing();
     if (!clip) {
         return;
     }
@@ -465,59 +510,83 @@ async function unreview() {
     render();
 }
 
-/**
- * In unreviewed mode the clip just answered leaves the list, so the next one takes its index and the
- * position must not move. That is the difference between working through the queue and answering
- * every other clip in it.
- */
 function advance() {
-    const list = shown();
-    if (!unreviewedOnly) {
-        at = at + 1;
+    const clip = viewing();
+    const next = clip ? nextAfter(clip.t) : queue()[0];
+    if (next) {
+        goTo(next, true);
+    } else {
+        render();
     }
-    if (at > list.length - 1) {
-        at = Math.max(0, list.length - 1);
-    }
-    if (list.length === 0) {
-        at = 0;
-    }
-    render();
 }
 
-document.getElementById("prev").onclick = () => { at = Math.max(0, at - 1); render(); };
+document.getElementById("prev").onclick = () => back();
+document.getElementById("next").onclick = () => advance();
 document.getElementById("unreview").onclick = () => unreview();
 document.getElementById("mode").onclick = () => {
     unreviewedOnly = !unreviewedOnly;
     document.getElementById("mode").textContent = unreviewedOnly ? "showing unreviewed" : "showing everything";
-    at = 0;
     render();
 };
 
+/**
+ * Nothing on this page keeps keyboard focus.
+ *
+ * A player's own controls take focus the moment they are clicked, and a button keeps it after being
+ * pressed. Either one then eats space: the player treats it as pause, the button as another press.
+ * Since every key here is a global shortcut and nothing needs typing into, focus is handed straight
+ * back to the page after any click.
+ */
+document.addEventListener("pointerup", () => {
+    if (document.activeElement && document.activeElement !== document.body) {
+        document.activeElement.blur();
+    }
+});
+
+/**
+ * Taken in the capture phase, before anything else sees it.
+ *
+ * A player's built in controls handle keys themselves and stop them going any further, so a listener
+ * waiting for the event to bubble up never runs at all. Catching it on the way down, and stopping it
+ * there, means a shortcut works the same whatever happens to be focused.
+ */
 document.addEventListener("keydown", event => {
-    if (event.target.tagName === "INPUT" || event.metaKey || event.ctrlKey) {
+    if (event.metaKey || event.ctrlKey || event.altKey) {
         return;
     }
-    if (event.key >= "1" && event.key <= String(LABELS.length)) {
+    const tag = event.target && event.target.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA") {
+        return;
+    }
+    const handled = () => {
         event.preventDefault();
+        event.stopPropagation();
+    };
+    if (event.key >= "1" && event.key <= String(LABELS.length)) {
+        handled();
         choose(LABELS[Number(event.key) - 1].key);
         return;
     }
     if (event.key === "0") {
-        event.preventDefault();
+        handled();
         unreview();
         return;
     }
     if (event.key === " ") {
-        event.preventDefault();
+        handled();
         nothing();
         return;
     }
     if (event.key === "ArrowLeft") {
-        event.preventDefault();
-        at = Math.max(0, at - 1);
-        render();
+        handled();
+        back();
+        return;
     }
-});
+    if (event.key === "ArrowRight") {
+        handled();
+        advance();
+    }
+}, true);
 
 load();
 </script>`;
