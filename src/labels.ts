@@ -33,6 +33,7 @@ export const LABEL_KEYS = new Set(LABELS.map(label => label.key));
 export type Label = {
     /** The clip's peak time, which is its identity everywhere else too. */
     t: number;
+    /** Empty means somebody watched it and decided none of the labels applied. That is an answer. */
     labels: string[];
     /** When it was judged, so a later pass can tell old opinions from new ones. */
     at: number;
@@ -55,25 +56,21 @@ export function readLabel(root: string, day: string, file: string): Label | unde
 /**
  * Applies the subset rule and writes.
  *
- * Enforced here rather than trusted from the page, because the page is not the only thing that could
- * ever write one of these and a stored label that contradicts the rule would be a quiet mess later.
- * An empty set removes the file, so "no labels" and "not judged yet" stay the same thing.
+ * The file existing is what "reviewed" means, and an empty label list is a real answer: somebody
+ * watched this clip and decided nothing applies. That is a judgement and it is worth exactly as much
+ * to a dataset as a positive one, so it is written down. Treating it as "not looked at yet" would put
+ * the clip straight back in the queue and make it impossible to ever finish.
+ *
+ * The subset rule is enforced here rather than trusted from the page, because the page is not the
+ * only thing that could write one of these and a stored label contradicting it would be a quiet mess
+ * later.
  */
-export function writeLabel(root: string, day: string, file: string, wanted: string[]): Label | undefined {
+export function writeLabel(root: string, day: string, file: string, wanted: string[]): Label {
     const chosen = new Set(wanted.filter(key => LABEL_KEYS.has(key)));
     for (const label of LABELS) {
         if (label.implies && chosen.has(label.key)) {
             chosen.add(label.implies);
         }
-    }
-    const target = labelPath(root, day, file);
-    if (chosen.size === 0) {
-        try {
-            fs.unlinkSync(target);
-        } catch {
-            // Never judged, or already cleared. Either way it is now in the state asked for.
-        }
-        return undefined;
     }
     const match = /_(\d+)\.mp4$/.exec(file);
     const label: Label = {
@@ -82,6 +79,15 @@ export function writeLabel(root: string, day: string, file: string, wanted: stri
         labels: LABELS.filter(item => chosen.has(item.key)).map(item => item.key),
         at: Date.now(),
     };
-    fs.writeFileSync(target, `${JSON.stringify(label)}\n`);
+    fs.writeFileSync(labelPath(root, day, file), `${JSON.stringify(label)}\n`);
     return label;
+}
+
+/** Undoes the review entirely, putting the clip back in the queue. Not the same as labelling it none. */
+export function clearLabel(root: string, day: string, file: string) {
+    try {
+        fs.unlinkSync(labelPath(root, day, file));
+    } catch {
+        // Never reviewed, which is the state asked for.
+    }
 }

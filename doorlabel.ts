@@ -3,7 +3,7 @@ import * as http from "http";
 import * as path from "path";
 import { formatDateTime } from "socket-function/src/formatting/format";
 import { isLocalAddress } from "./src/network";
-import { LABELS, readLabel, writeLabel, Label } from "./src/labels";
+import { LABELS, readLabel, writeLabel, clearLabel } from "./src/labels";
 
 /**
  * A page for labelling the door clips, once.
@@ -11,8 +11,11 @@ import { LABELS, readLabel, writeLabel, Label } from "./src/labels";
  * This is a tool for one pass over the archive by one person, and everything about it is shaped by
  * that. There are hundreds of clips and each is judged in a couple of seconds, so the whole design is
  * about not making the person wait or aim: the video is already playing, the keys are under their
- * fingers, and choosing a label saves it and moves on by itself. No save button, no forms, no
- * confirmation, nothing to click twice.
+ * fingers, and answering saves it and moves on by itself.
+ *
+ * Reviewed and labelled are separate. Deciding that none of the labels apply is an answer, and worth
+ * as much to a dataset as a positive one, so it is written down and the clip does not come back. A
+ * clip only returns to the queue if the review is explicitly undone.
  */
 
 const PORT = 8773;
@@ -24,14 +27,14 @@ function log(message: string) {
     console.log(`${formatDateTime(Date.now())} | ${message}`);
 }
 
-type Clip = { day: string; file: string; t: number; bytes: number; labels: string[] };
+type Clip = { day: string; file: string; t: number; bytes: number; reviewed: boolean; labels: string[] };
 
 /**
- * Every clip on disk, with whatever it has been labelled.
+ * Every clip on disk, with whatever it has been judged.
  *
  * Read fresh on each request for the list. The set only changes when the sync daemon adds a clip, and
  * a directory walk of a few hundred entries costs nothing next to always showing what is actually
- * there. Caching it would mean the page and the disk could disagree about what has been judged.
+ * there. Caching it would mean the page and the disk could disagree about what has been reviewed.
  */
 function listClips(): Clip[] {
     const out: Clip[] = [];
@@ -56,7 +59,14 @@ function listClips(): Clip[] {
                 continue;
             }
             const label = readLabel(CLIP_ROOT, day, file);
-            out.push({ day, file, t: Number(CLIP_NAME.exec(file)![1]), bytes, labels: label?.labels ?? [] });
+            out.push({
+                day,
+                file,
+                t: Number(CLIP_NAME.exec(file)![1]),
+                bytes,
+                reviewed: !!label,
+                labels: label?.labels ?? [],
+            });
         }
     }
     return out;
@@ -107,17 +117,27 @@ function sendVideo(request: http.IncomingMessage, response: http.ServerResponse,
 const PAGE = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>door clips</title>
 <style>
-:root { color-scheme: dark; --line: #8886; --on: #d9822b; }
+:root { color-scheme: dark; --line: #8886; --on: #d9822b; --yes: #4a9d5f; }
 body { font: 14px/1.5 system-ui, sans-serif; margin: 0; padding: 14px 16px 40px; background: #14171c; color: #e8e8e8; }
 h1 { font-size: 13px; text-transform: uppercase; letter-spacing: .07em; opacity: .5; margin: 0 0 10px; font-weight: 600; }
-#top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 14px; margin-bottom: 10px; }
+#top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 14px; margin-bottom: 8px; }
 #when { font-size: 17px; font-weight: 600; }
+#place { font-size: 17px; font-weight: 600; color: var(--on); margin-left: auto; font-variant-numeric: tabular-nums; }
 .quiet { opacity: .55; }
-#bar { height: 4px; background: #8883; border-radius: 3px; overflow: hidden; margin-bottom: 12px; }
+/* Two bars, because they answer different questions. The top one is how far through the queue in
+   front of you; the thin one is how much of the whole archive has ever been judged. Either alone
+   left something you could not see. */
+#bar { height: 9px; background: #8883; border-radius: 5px; overflow: hidden; margin-bottom: 4px; }
 #bar div { height: 100%; background: var(--on); width: 0; transition: width .2s; }
+#allbar { height: 4px; background: #8883; border-radius: 3px; overflow: hidden; margin-bottom: 9px; }
+#allbar div { height: 100%; background: var(--yes); width: 0; transition: width .2s; }
+#numbers { display: flex; flex-wrap: wrap; gap: 2px 20px; margin-bottom: 13px; font-size: 13px; }
+#numbers b { font-variant-numeric: tabular-nums; font-weight: 600; }
+#numbers .done b { color: var(--yes); }
+#numbers .left b { color: var(--on); }
 #stage { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
 video { width: min(100%, 900px); background: #000; border-radius: 8px; display: block; }
-#side { flex: 1; min-width: 260px; }
+#side { flex: 1; min-width: 270px; }
 .choice { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; font: inherit;
           padding: 9px 12px; margin-bottom: 7px; border: 1px solid var(--line); border-radius: 8px;
           background: none; color: inherit; cursor: pointer; }
@@ -127,57 +147,92 @@ video { width: min(100%, 900px); background: #000; border-radius: 8px; display: 
                border-radius: 4px; padding: 1px 7px; min-width: 18px; text-align: center; }
 .choice.sub { margin-left: 22px; width: calc(100% - 22px); }
 .choice.sub .name::before { content: "\\21B3\\00a0"; opacity: .5; }
-#keys { margin-top: 14px; font-size: 12px; opacity: .5; line-height: 1.9; }
+.choice.none { border-style: dashed; margin-top: 12px; }
+#state { margin-top: 12px; font-size: 13px; }
+#state.seen { color: var(--yes); }
+#keys { margin-top: 12px; font-size: 12px; opacity: .5; line-height: 1.9; }
 #keys b { font-family: ui-monospace, monospace; background: #8883; border-radius: 4px; padding: 1px 6px; font-weight: 400; }
-#nav { display: flex; gap: 8px; margin-top: 14px; }
+#nav { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
 button.plain { font: inherit; padding: 6px 12px; border: 1px solid var(--line); border-radius: 8px;
                background: none; color: inherit; cursor: pointer; }
 button.plain:hover { border-color: #aaa; }
-#done { text-align: center; padding: 60px 20px; font-size: 16px; }
-#tally { margin-top: 18px; font-size: 12px; opacity: .6; }
-#tally span { margin-right: 14px; white-space: nowrap; }
+#done { padding: 50px 20px; font-size: 16px; }
 </style>
 <h1>door clips</h1>
 <div id="top">
   <span id="when">loading</span>
-  <span id="count" class="quiet"></span>
   <span id="saved" class="quiet"></span>
+  <span id="place"></span>
 </div>
 <div id="bar"><div id="fill"></div></div>
+<div id="allbar"><div id="allfill"></div></div>
+<div id="numbers"></div>
 <div id="stage">
   <video id="video" autoplay loop muted playsinline controls></video>
   <div id="side">
     <div id="choices"></div>
+    <div id="state"></div>
     <div id="nav">
       <button class="plain" id="prev">back</button>
-      <button class="plain" id="skip">skip</button>
-      <button class="plain" id="mode">reviewing unlabelled</button>
+      <button class="plain" id="unreview">un-review</button>
+      <button class="plain" id="mode">showing unreviewed</button>
     </div>
     <div id="keys"></div>
-    <div id="tally"></div>
   </div>
 </div>
-<div id="done" hidden>every clip has been labelled.</div>
+<div id="done" hidden>every clip has been reviewed.</div>
 <script>
 const LABELS = __LABELS__;
 let clips = [];
 let at = 0;
-let unlabelledOnly = true;
+let unreviewedOnly = true;
 
 const video = document.getElementById("video");
 const choicesHolder = document.getElementById("choices");
 const savedNote = document.getElementById("saved");
 
 function shown() {
-    return unlabelledOnly ? clips.filter(clip => clip.labels.length === 0) : clips;
+    return unreviewedOnly ? clips.filter(clip => !clip.reviewed) : clips;
 }
 function current() {
     return shown()[at];
 }
 
+/**
+ * The position lives in the address bar, as the clip's own id rather than its number in the list.
+ * The number moves the moment anything is reviewed; the id does not, so reloading lands on the same
+ * clip and not merely the same place in a list that has since shifted underneath it.
+ */
+function remember() {
+    const clip = current();
+    const query = (clip ? "?clip=" + clip.t : "?") + (unreviewedOnly ? "" : "&all=1");
+    history.replaceState(null, "", query);
+}
+
+function restore() {
+    const params = new URLSearchParams(location.search);
+    unreviewedOnly = params.get("all") !== "1";
+    document.getElementById("mode").textContent = unreviewedOnly ? "showing unreviewed" : "showing everything";
+    const wanted = Number(params.get("clip"));
+    if (!wanted) {
+        at = 0;
+        return;
+    }
+    const list = shown();
+    const exact = list.findIndex(clip => clip.t === wanted);
+    if (exact >= 0) {
+        at = exact;
+        return;
+    }
+    // It was reviewed and has left this list, so land on the next clip in time rather than at the
+    // top. Coming back to the beginning after a reload would be the single most annoying thing here.
+    const after = list.findIndex(clip => clip.t > wanted);
+    at = after >= 0 ? after : Math.max(0, list.length - 1);
+}
+
 async function load() {
     clips = await (await fetch("/clips")).json();
-    at = 0;
+    restore();
     render();
 }
 
@@ -186,21 +241,52 @@ function render() {
     const clip = list[at];
     document.getElementById("done").hidden = !!clip;
     document.getElementById("stage").hidden = !clip;
-    const labelled = clips.filter(item => item.labels.length > 0).length;
-    document.getElementById("count").textContent = labelled + " of " + clips.length + " labelled";
-    document.getElementById("fill").style.width = (clips.length ? (labelled / clips.length) * 100 : 0) + "%";
-    tally();
+
+    const reviewed = clips.filter(item => item.reviewed).length;
+    const remaining = clips.length - reviewed;
+    document.getElementById("allfill").style.width = (clips.length ? (reviewed / clips.length) * 100 : 0) + "%";
+    document.getElementById("fill").style.width =
+        (list.length ? ((clip ? at : list.length) / list.length) * 100 : 100) + "%";
+    document.getElementById("place").textContent = clip ? (at + 1) + " of " + list.length : "";
+
+    const counts = new Map();
+    for (const item of clips) {
+        for (const key of item.labels) {
+            counts.set(key, (counts.get(key) || 0) + 1);
+        }
+    }
+    const numbers = document.getElementById("numbers");
+    numbers.replaceChildren();
+    const stat = (name, value, klass) => {
+        const span = document.createElement("span");
+        span.className = klass || "";
+        span.append(name + " ");
+        const b = document.createElement("b");
+        b.textContent = String(value);
+        span.append(b);
+        numbers.append(span);
+    };
+    stat("reviewed", reviewed, "done");
+    stat("left", remaining, "left");
+    stat("total", clips.length);
+    for (const label of LABELS) {
+        stat(label.name, counts.get(label.key) || 0);
+    }
+    stat("reviewed as nothing", clips.filter(item => item.reviewed && item.labels.length === 0).length);
+
+    remember();
     if (!clip) {
         document.getElementById("when").textContent = "done";
         return;
     }
     document.getElementById("when").textContent = new Date(clip.t).toLocaleString();
     // Only reload the source when the clip actually changed, so re-rendering after a keystroke does
-    // not restart a video the person is still watching.
+    // not restart a video that is still being watched.
     const src = "/clip/" + clip.day + "/" + clip.file;
     if (!video.src.endsWith(src)) {
         video.src = src;
     }
+
     choicesHolder.replaceChildren();
     LABELS.forEach((label, index) => {
         const button = document.createElement("button");
@@ -215,30 +301,31 @@ function render() {
         button.onclick = () => choose(label.key);
         choicesHolder.append(button);
     });
-    document.getElementById("keys").innerHTML =
-        "<b>1</b>&ndash;<b>" + LABELS.length + "</b> label and move on &nbsp; <b>space</b> skip"
-        + " &nbsp; <b>&larr;</b> back &nbsp; <b>0</b> clear";
-}
+    const none = document.createElement("button");
+    none.className = "choice none" + (clip.reviewed && clip.labels.length === 0 ? " on" : "");
+    const noneKey = document.createElement("span");
+    noneKey.className = "key";
+    noneKey.textContent = "space";
+    const noneName = document.createElement("span");
+    noneName.className = "name";
+    noneName.textContent = "none of these";
+    none.append(noneKey, noneName);
+    none.onclick = () => nothing();
+    choicesHolder.append(none);
 
-function tally() {
-    const counts = new Map();
-    for (const clip of clips) {
-        for (const key of clip.labels) {
-            counts.set(key, (counts.get(key) || 0) + 1);
-        }
-    }
-    const holder = document.getElementById("tally");
-    holder.replaceChildren();
-    for (const label of LABELS) {
-        const span = document.createElement("span");
-        span.textContent = label.name + ": " + (counts.get(label.key) || 0);
-        holder.append(span);
-    }
+    const state = document.getElementById("state");
+    state.className = clip.reviewed ? "seen" : "quiet";
+    state.textContent = clip.reviewed
+        ? (clip.labels.length ? "reviewed" : "reviewed, nothing applied")
+        : "not reviewed yet";
+    document.getElementById("keys").innerHTML =
+        "<b>1</b>&ndash;<b>" + LABELS.length + "</b> label &nbsp; <b>space</b> none of these"
+        + " &nbsp; <b>&larr;</b> back &nbsp; <b>0</b> un-review";
 }
 
 /**
  * A label is a decision, so it saves and moves on. Toggling one off stays put, because turning
- * something off is a correction rather than a judgement and the person is still looking at it.
+ * something off is a correction rather than a judgement and the clip is still on screen.
  */
 async function choose(key) {
     const clip = current();
@@ -257,11 +344,21 @@ async function choose(key) {
         });
     }
     await save(clip, wanted);
-    if (!had) {
-        advance();
-    } else {
+    if (had) {
         render();
+    } else {
+        advance();
     }
+}
+
+/** Nothing applied. A real answer, recorded like any other, and the clip does not come back. */
+async function nothing() {
+    const clip = current();
+    if (!clip) {
+        return;
+    }
+    await save(clip, []);
+    advance();
 }
 
 async function save(clip, wanted) {
@@ -271,33 +368,51 @@ async function save(clip, wanted) {
         body: JSON.stringify({ day: clip.day, file: clip.file, labels: wanted }),
     })).json();
     clip.labels = reply.labels || [];
+    clip.reviewed = true;
     savedNote.textContent = "saved";
     setTimeout(() => { savedNote.textContent = ""; }, 900);
 }
 
+/** Puts it back in the queue. The only way a reviewed clip is ever shown again. */
+async function unreview() {
+    const clip = current();
+    if (!clip) {
+        return;
+    }
+    await fetch("/unreview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ day: clip.day, file: clip.file }),
+    });
+    clip.reviewed = false;
+    clip.labels = [];
+    render();
+}
+
 /**
- * In unlabelled mode the clip just judged leaves the list, so the next one takes its index and the
- * position must not move. That is the difference between labelling the queue and labelling every
- * other clip in it.
+ * In unreviewed mode the clip just answered leaves the list, so the next one takes its index and the
+ * position must not move. That is the difference between working through the queue and answering
+ * every other clip in it.
  */
 function advance() {
-    if (!unlabelledOnly) {
-        at = Math.min(at + 1, shown().length);
+    const list = shown();
+    if (!unreviewedOnly) {
+        at = at + 1;
     }
-    if (at >= shown().length) {
-        at = Math.max(0, shown().length - (shown().length ? 1 : 0));
-        if (shown().length === 0) {
-            at = 0;
-        }
+    if (at > list.length - 1) {
+        at = Math.max(0, list.length - 1);
+    }
+    if (list.length === 0) {
+        at = 0;
     }
     render();
 }
 
-document.getElementById("skip").onclick = () => { at = Math.min(at + 1, Math.max(0, shown().length - 1)); render(); };
 document.getElementById("prev").onclick = () => { at = Math.max(0, at - 1); render(); };
+document.getElementById("unreview").onclick = () => unreview();
 document.getElementById("mode").onclick = () => {
-    unlabelledOnly = !unlabelledOnly;
-    document.getElementById("mode").textContent = unlabelledOnly ? "reviewing unlabelled" : "reviewing everything";
+    unreviewedOnly = !unreviewedOnly;
+    document.getElementById("mode").textContent = unreviewedOnly ? "showing unreviewed" : "showing everything";
     at = 0;
     render();
 };
@@ -313,27 +428,39 @@ document.addEventListener("keydown", event => {
     }
     if (event.key === "0") {
         event.preventDefault();
-        const clip = current();
-        if (clip) {
-            save(clip, []).then(render);
-        }
+        unreview();
         return;
     }
     if (event.key === " ") {
         event.preventDefault();
-        document.getElementById("skip").click();
+        nothing();
         return;
     }
     if (event.key === "ArrowLeft") {
         event.preventDefault();
-        document.getElementById("prev").click();
+        at = Math.max(0, at - 1);
+        render();
     }
 });
 
 load();
 </script>`;
 
-const server = http.createServer((request, response) => {
+function readBody(request: http.IncomingMessage): Promise<string> {
+    return new Promise((resolve, reject) => {
+        let body = "";
+        request.on("data", chunk => {
+            body += chunk;
+            if (body.length > 4096) {
+                request.destroy();
+            }
+        });
+        request.on("end", () => resolve(body));
+        request.on("error", reject);
+    });
+}
+
+const server = http.createServer(async (request, response) => {
     // The clips are video of where somebody lives, so nothing outside this network is served, whatever
     // it asks for and however the port came to be reachable.
     if (!isLocalAddress(request.socket.remoteAddress)) {
@@ -364,28 +491,27 @@ const server = http.createServer((request, response) => {
         sendVideo(request, response, target);
         return;
     }
-    if (url.pathname === "/label" && request.method === "POST") {
-        let body = "";
-        request.on("data", chunk => {
-            body += chunk;
-            if (body.length > 4096) {
-                request.destroy();
+    if ((url.pathname === "/label" || url.pathname === "/unreview") && request.method === "POST") {
+        try {
+            const parsed = JSON.parse(await readBody(request)) as { day?: string; file?: string; labels?: string[] };
+            const day = String(parsed.day);
+            const file = String(parsed.file);
+            if (!clipFile(day, file)) {
+                throw new Error(`No such clip`);
             }
-        });
-        request.on("end", () => {
-            try {
-                const parsed = JSON.parse(body) as { day?: string; file?: string; labels?: string[] };
-                if (!clipFile(String(parsed.day), String(parsed.file))) {
-                    throw new Error(`No such clip`);
-                }
-                const saved: Label | undefined = writeLabel(CLIP_ROOT, String(parsed.day), String(parsed.file), parsed.labels ?? []);
+            if (url.pathname === "/unreview") {
+                clearLabel(CLIP_ROOT, day, file);
                 response.writeHead(200, { "Content-Type": "application/json" });
-                response.end(JSON.stringify({ labels: saved?.labels ?? [] }));
-            } catch (error) {
-                response.writeHead(400, { "Content-Type": "application/json" });
-                response.end(JSON.stringify({ error: (error as Error).message }));
+                response.end(JSON.stringify({ reviewed: false, labels: [] }));
+                return;
             }
-        });
+            const saved = writeLabel(CLIP_ROOT, day, file, parsed.labels ?? []);
+            response.writeHead(200, { "Content-Type": "application/json" });
+            response.end(JSON.stringify({ reviewed: true, labels: saved.labels }));
+        } catch (error) {
+            response.writeHead(400, { "Content-Type": "application/json" });
+            response.end(JSON.stringify({ error: (error as Error).message }));
+        }
         return;
     }
     response.writeHead(404, { "Content-Type": "text/plain" });
@@ -394,6 +520,6 @@ const server = http.createServer((request, response) => {
 
 server.listen(PORT, () => {
     const clips = listClips();
-    const labelled = clips.filter(clip => clip.labels.length > 0).length;
-    log(`labelling ${clips.length} clips, ${labelled} already done, at http://10.0.0.200:${PORT}`);
+    const reviewed = clips.filter(clip => clip.reviewed).length;
+    log(`${clips.length} clips, ${reviewed} reviewed, ${clips.length - reviewed} left, at http://10.0.0.200:${PORT}`);
 });
