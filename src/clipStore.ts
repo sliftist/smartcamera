@@ -148,27 +148,54 @@ export class ClipStore {
     }
 
     /**
-     * Deletes oldest first until back under budget.
+     * A clip somebody has labelled by hand, which must not be deleted.
      *
-     * Sorted per call rather than kept sorted. A prune happens once per download at most and only
-     * when full, where a walk of the in memory list is nothing; keeping an ordered structure correct
-     * through every insert and delete would be more to get wrong than it saves.
+     * Checked against the disk rather than remembered, because the labelling runs in another process
+     * and anything held here would be as old as the last restart. It is a single stat, and only on a
+     * clip about to be deleted, so the cost lands where it can be afforded.
      */
-    prune(): { removed: number; bytes: number } {
+    private labelled(clip: StoredClip): boolean {
+        const sidecar = path.join(this.root, clip.day, `${clip.file.replace(/\.mp4$/, "")}.json`);
+        try {
+            fs.accessSync(sidecar);
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    /**
+     * Deletes oldest first until back under budget, keeping anything labelled.
+     *
+     * A label is the only thing here that cannot be recreated: the footage can always be fetched
+     * again while the camera still holds it, but somebody sat and watched that clip. Losing one to a
+     * routine cleanup would be the worst thing this could do, so a labelled clip stays even if that
+     * means sitting over budget.
+     *
+     * Sorted per call rather than kept sorted. A prune happens at most once per download and only
+     * when full, where a walk of the list is nothing next to keeping an ordered structure correct
+     * through every insert and delete.
+     */
+    prune(): { removed: number; bytes: number; kept: number } {
         if (this.totalBytes <= this.budgetBytes) {
-            return { removed: 0, bytes: 0 };
+            return { removed: 0, bytes: 0, kept: 0 };
         }
         const order = [...this.clips.values()].sort((left, right) => left.t - right.t);
         let removed = 0;
         let bytes = 0;
+        let kept = 0;
         for (const clip of order) {
             if (this.totalBytes <= this.budgetBytes) {
                 break;
+            }
+            if (this.labelled(clip)) {
+                kept++;
+                continue;
             }
             bytes += clip.bytes;
             removed++;
             this.remove(clip);
         }
-        return { removed, bytes };
+        return { removed, bytes, kept };
     }
 }

@@ -62,7 +62,8 @@
         "test:comparison": "typenode ./scripts/comparison.test.ts",
         "test": "yarn test:questions && yarn test:history && yarn test:comparison",
         "tune": "typenode ./scripts/tuneServer.ts",
-        "doorsync": "typenode ./doorsync.ts"
+        "doorsync": "typenode ./doorsync.ts",
+        "doorlabel": "typenode ./doorlabel.ts"
     },
     "dependencies": {
         "cbor-x": "^1.6.6",

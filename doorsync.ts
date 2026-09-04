@@ -211,8 +211,9 @@ class Sync {
                 }
             }
             const pruned = this.store.prune();
-            if (pruned.removed > 0) {
-                log(`over budget, deleted ${pruned.removed} of the oldest clips, freeing ${sizeOf(pruned.bytes)}`);
+            if (pruned.removed > 0 || pruned.kept > 0) {
+                log(`over budget, deleted ${pruned.removed} of the oldest clips, freeing ${sizeOf(pruned.bytes)}`
+                    + `${pruned.kept > 0 ? `, kept ${pruned.kept} that are labelled` : ""}`);
             }
         }
         return taken;
