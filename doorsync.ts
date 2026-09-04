@@ -177,6 +177,14 @@ class Sync {
         return !oldest || section.t > oldest.t;
     }
 
+    /**
+     * Takes everything worth taking from a list of clips.
+     *
+     * A clip that fails costs that clip and nothing else. The camera stalls occasionally, and letting
+     * one stall abort the run would send the backfill back to the first day to work out where it had
+     * got to. Tried twice, since a stall is usually transient and the retry lands on a fresh
+     * connection, then given up on for this run.
+     */
     async take(sections: Section[]): Promise<number> {
         let taken = 0;
         for (const section of sections) {
@@ -187,15 +195,20 @@ class Sync {
                 this.skipped.add(section.t);
                 continue;
             }
-            try {
-                if (await this.fetchClip(section)) {
-                    taken++;
-                    this.downloaded++;
+            for (let attempt = 1; attempt <= 2; attempt++) {
+                try {
+                    if (await this.fetchClip(section)) {
+                        taken++;
+                        this.downloaded++;
+                    }
+                    break;
+                } catch (error) {
+                    this.drop(error as Error);
+                    if (attempt === 2) {
+                        this.failed++;
+                        log(`giving up on the clip at ${formatDateTime(section.s)} for now`);
+                    }
                 }
-            } catch (error) {
-                this.failed++;
-                this.drop(error as Error);
-                throw error;
             }
             const pruned = this.store.prune();
             if (pruned.removed > 0) {

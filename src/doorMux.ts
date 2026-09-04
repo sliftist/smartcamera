@@ -15,6 +15,17 @@ import { Gop } from "./doorClient";
 
 /** The camera's nominal rate. Only a fallback: real timing comes from the per frame offsets. */
 const FPS = 30;
+/**
+ * The camera's real picture height, against the 1088 it actually encodes.
+ *
+ * Its hardware wants a multiple of sixteen, so it pads the frame and encodes the padding along with
+ * everything else. Those rows hold nothing and come out as a green band across the bottom. The
+ * parameter set does not mark them as cropped, so the container has to: a player shows the track's
+ * declared size, and declaring the real one hides the band without touching a single encoded byte.
+ */
+const VISIBLE_HEIGHT = 1080;
+/** Padding can only ever be less than the alignment, so a bigger gap than this is a real picture. */
+const MAX_PADDING_ROWS = 16;
 
 /** On disk each unit is preceded by its length as four bytes, rather than a start code. */
 export function splitFramedNals(buf: Buffer): Buffer[] {
@@ -266,9 +277,10 @@ export function muxClip(pieces: { gop: Gop; bytes: Buffer }[]): MuxedClip {
     }
 
     const { width, height } = parseSpsDims(sps);
+    const shown = height > VISIBLE_HEIGHT && height - VISIBLE_HEIGHT < MAX_PADDING_ROWS ? VISIBLE_HEIGHT : height;
     const muxer = new Muxer({
         target: new ArrayBufferTarget(),
-        video: { codec: "avc", width, height, frameRate: FPS },
+        video: { codec: "avc", width, height: shown, frameRate: FPS },
         fastStart: "in-memory",
     });
     const description = buildAvcC(sps, pps);
@@ -290,7 +302,7 @@ export function muxClip(pieces: { gop: Gop; bytes: Buffer }[]): MuxedClip {
         mp4: Buffer.from(muxer.target.buffer),
         frames: samples.length,
         width,
-        height,
+        height: shown,
         durationMs: Math.round((previousUs + nominalUs) / 1000),
     };
 }

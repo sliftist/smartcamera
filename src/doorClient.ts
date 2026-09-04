@@ -18,6 +18,17 @@ import { encode, decode } from "cbor-x";
 /** Where the camera lives. Its server binds every interface on this port. */
 export const DOOR_HOST = "10.0.0.189";
 export const DOOR_PORT = 8443;
+/**
+ * How long to wait for a reply before giving up on the connection.
+ *
+ * Not optional. The camera can stop part way through sending one, and a half delivered websocket
+ * frame never completes, so without this the wait is forever: the socket stays established, nothing
+ * is in flight, and the process sits in the event loop looking perfectly healthy. That is exactly
+ * what happened, and it is the worst shape of failure for something meant to run unattended.
+ *
+ * Generous, because nothing here is in a hurry and a loaded camera is slow rather than broken.
+ */
+const CALL_TIMEOUT_MS = 60 * 1000;
 
 /**
  * An activity clip, as the camera records it: start, end, the peak frame's time, and how much
@@ -41,7 +52,11 @@ type Packet = { type: string; id: number; method?: string; args?: unknown[]; val
 
 export class DoorClient {
     private socket: WebSocket | undefined;
-    private pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
+    private pending = new Map<number, {
+        resolve: (value: unknown) => void;
+        reject: (error: Error) => void;
+        timer: ReturnType<typeof setTimeout>;
+    }>();
     private nextId = 1;
 
     constructor(private password: string, private host = DOOR_HOST, private port = DOOR_PORT) {}
@@ -78,7 +93,17 @@ export class DoorClient {
         }
         const id = this.nextId++;
         return new Promise<T>((resolve, reject) => {
-            this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject });
+            const timer = setTimeout(() => {
+                // The socket is torn down rather than just this call abandoned. A reply that stopped
+                // half way leaves the framing mid message, so nothing arriving after it can be
+                // trusted to line up with the call it claims to answer. Reconnecting is the only
+                // honest recovery, and the caller retries.
+                this.pending.delete(id);
+                reject(new Error(`the camera did not answer ${method} within ${CALL_TIMEOUT_MS / 1000}s`));
+                this.close();
+                this.fail(new Error(`the connection was dropped after ${method} timed out`));
+            }, CALL_TIMEOUT_MS);
+            this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer });
             socket.send(encode({ type: "call", id, method, args }));
         });
     }
@@ -104,6 +129,7 @@ export class DoorClient {
             return;
         }
         this.pending.delete(packet.id);
+        clearTimeout(waiting.timer);
         if (packet.error) {
             waiting.reject(new Error(packet.error.message));
         } else {
@@ -114,6 +140,7 @@ export class DoorClient {
     private fail(error: Error) {
         for (const [id, waiting] of [...this.pending]) {
             this.pending.delete(id);
+            clearTimeout(waiting.timer);
             waiting.reject(error);
         }
     }
@@ -156,7 +183,7 @@ export class DoorClient {
  * The camera normalises what it is sent, keeping only letters and lowercasing them, so spaces,
  * capitals and stray punctuation in this file do not matter and nothing needs cleaning up here.
  */
-export const DOOR_PASSWORD_FILE = "/root/mydoorcamerapassword.txt";
+export const DOOR_PASSWORD_FILE = "/root/mydoorcamera.txt";
 export const PASSWORD_POLL_MS = 5000;
 
 /** Waits for the password file, saying where it is looking each time rather than failing quietly. */
