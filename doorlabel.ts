@@ -92,6 +92,9 @@ function clipFile(day: string, file: string): string | undefined {
  */
 function sendVideo(request: http.IncomingMessage, response: http.ServerResponse, target: string) {
     const size = fs.statSync(target).size;
+    // A clip is written once and never changed, so the browser is told it can keep it. That is what
+    // lets going back to an earlier clip cost nothing, on top of the player that preloads forwards.
+    const cache = { "Cache-Control": "private, max-age=86400, immutable" };
     const range = /^bytes=(\d*)-(\d*)$/.exec(request.headers.range ?? "");
     if (range) {
         const start = range[1] ? Number(range[1]) : 0;
@@ -106,11 +109,12 @@ function sendVideo(request: http.IncomingMessage, response: http.ServerResponse,
             "Content-Length": end - start + 1,
             "Content-Range": `bytes ${start}-${end}/${size}`,
             "Accept-Ranges": "bytes",
+            ...cache,
         });
         fs.createReadStream(target, { start, end }).pipe(response);
         return;
     }
-    response.writeHead(200, { "Content-Type": "video/mp4", "Content-Length": size, "Accept-Ranges": "bytes" });
+    response.writeHead(200, { "Content-Type": "video/mp4", "Content-Length": size, "Accept-Ranges": "bytes", ...cache });
     fs.createReadStream(target).pipe(response);
 }
 
@@ -136,7 +140,12 @@ h1 { font-size: 13px; text-transform: uppercase; letter-spacing: .07em; opacity:
 #numbers .done b { color: var(--yes); }
 #numbers .left b { color: var(--on); }
 #stage { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
-video { width: min(100%, 900px); background: #000; border-radius: 8px; display: block; }
+/* Two players stacked, one showing and one quietly loading the clip after this one. Stacked rather
+   than hidden, because a player set to display none is treated as off screen and gets its loading
+   deprioritised, which is the whole thing this is trying to avoid. */
+.stack { position: relative; width: min(100%, 900px); }
+.stack video { width: 100%; background: #000; border-radius: 8px; display: block; }
+.stack video.standby { position: absolute; inset: 0; opacity: 0; pointer-events: none; }
 #side { flex: 1; min-width: 270px; }
 .choice { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; font: inherit;
           padding: 9px 12px; margin-bottom: 7px; border: 1px solid var(--line); border-radius: 8px;
@@ -168,7 +177,10 @@ button.plain:hover { border-color: #aaa; }
 <div id="allbar"><div id="allfill"></div></div>
 <div id="numbers"></div>
 <div id="stage">
-  <video id="video" autoplay loop muted playsinline controls></video>
+  <div class="stack">
+    <video id="videoA" loop muted playsinline controls preload="auto"></video>
+    <video id="videoB" class="standby" loop muted playsinline controls preload="auto"></video>
+  </div>
   <div id="side">
     <div id="choices"></div>
     <div id="state"></div>
@@ -187,9 +199,78 @@ let clips = [];
 let at = 0;
 let unreviewedOnly = true;
 
-const video = document.getElementById("video");
 const choicesHolder = document.getElementById("choices");
 const savedNote = document.getElementById("saved");
+
+/**
+ * Two players, one showing and one loading the clip that comes next.
+ *
+ * Swapped rather than reused. Pointing one player at a new file throws away everything it had
+ * buffered and starts again, which is the pause you feel between clips. Handing over to a player
+ * that already has the file, and already sits at the right moment in it, makes moving on immediate.
+ */
+const players = [document.getElementById("videoA"), document.getElementById("videoB")];
+let liveAt = 0;
+const live = () => players[liveAt];
+const standby = () => players[1 - liveAt];
+
+function sourceFor(clip) {
+    return "/clip/" + clip.day + "/" + clip.file;
+}
+
+/**
+ * Starts a clip from its middle, which is usually where whatever happened is happening.
+ *
+ * Done as soon as the duration is known rather than on play, so a player loading in the background
+ * is already sitting at the right moment before it is ever shown. Looping still restarts from the
+ * beginning, so watching a second time gives the whole clip.
+ */
+function toMiddle(video) {
+    const seek = () => {
+        if (video.duration > 0 && isFinite(video.duration)) {
+            try {
+                video.currentTime = video.duration / 2;
+            } catch {
+                // Not seekable yet. It plays from the start, which is worse but not broken.
+            }
+        }
+    };
+    if (video.readyState >= 1) {
+        seek();
+    } else {
+        video.addEventListener("loadedmetadata", seek, { once: true });
+    }
+}
+
+function point(video, clip) {
+    video.src = sourceFor(clip);
+    video.load();
+    toMiddle(video);
+}
+
+function showClip(clip) {
+    const wanted = sourceFor(clip);
+    if (live().src.endsWith(wanted)) {
+        // Already on screen. A re-render after a keystroke must not restart what is playing.
+    } else if (standby().src.endsWith(wanted)) {
+        // The one that was loading is the one wanted, so just trade places.
+        live().pause();
+        live().classList.add("standby");
+        liveAt = 1 - liveAt;
+        live().classList.remove("standby");
+        live().play().catch(() => { /* a browser that will not autoplay is not worth failing over */ });
+    } else {
+        point(live(), clip);
+        live().play().catch(() => { /* as above */ });
+    }
+    // Whatever is now standing by gets the clip after this one.
+    const list = shown();
+    const next = list[at + 1];
+    if (next && !standby().src.endsWith(sourceFor(next))) {
+        point(standby(), next);
+        standby().pause();
+    }
+}
 
 function shown() {
     return unreviewedOnly ? clips.filter(clip => !clip.reviewed) : clips;
@@ -280,12 +361,7 @@ function render() {
         return;
     }
     document.getElementById("when").textContent = new Date(clip.t).toLocaleString();
-    // Only reload the source when the clip actually changed, so re-rendering after a keystroke does
-    // not restart a video that is still being watched.
-    const src = "/clip/" + clip.day + "/" + clip.file;
-    if (!video.src.endsWith(src)) {
-        video.src = src;
-    }
+    showClip(clip);
 
     choicesHolder.replaceChildren();
     LABELS.forEach((label, index) => {
