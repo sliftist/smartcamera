@@ -61,10 +61,13 @@
         "test:history": "typenode ./scripts/history.test.ts",
         "test:comparison": "typenode ./scripts/comparison.test.ts",
         "test": "yarn test:questions && yarn test:history && yarn test:comparison",
-        "tune": "typenode ./scripts/tuneServer.ts"
+        "tune": "typenode ./scripts/tuneServer.ts",
+        "doorsync": "typenode ./doorsync.ts"
     },
     "dependencies": {
+        "cbor-x": "^1.6.6",
         "jpeg-js": "*",
+        "mp4-muxer": "^5.2.2",
         "node-av": "*",
         "onnxruntime-node": "*",
         "sliftutils": "^1.7.121",
