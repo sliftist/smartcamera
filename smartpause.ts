@@ -69,10 +69,15 @@ class Pauser {
         }
         const startedAtMs = Date.now();
         const result = await resumeMedia(this.paused);
+        if (result.error) {
+            log(`headphones back on, but could not resume ${this.paused.join(", ")}: ${result.error}`);
+            return;
+        }
         const skipped = result.skipped.length > 0
             ? `, left ${result.skipped.join(", ")} alone because something else changed it`
             : "";
-        log(`headphones back on, resumed ${result.changed.join(", ") || "nothing"}${skipped}`
+        const failed = result.failed.length > 0 ? `, failed on ${result.failed.join("; ")}` : "";
+        log(`headphones back on, resumed ${result.changed.join(", ") || "nothing"}${skipped}${failed}`
             + ` in ${Date.now() - startedAtMs}ms`);
         this.paused = [];
         this.nothingPlayingAtMs = 0;
@@ -84,9 +89,15 @@ class Pauser {
         }
         const startedAtMs = Date.now();
         const result = await pausePlayingMedia();
+        if (result.error) {
+            log(`headphones off, but could not pause: ${result.error}`);
+            this.nothingPlayingAtMs = Date.now();
+            return;
+        }
         if (result.changed.length === 0) {
             if (!this.nothingPlayingAtMs) {
-                log(`headphones off, but nothing was playing`);
+                const failed = result.failed.length > 0 ? `, failed on ${result.failed.join("; ")}` : "";
+                log(`headphones off, but nothing was playing${failed}`);
             }
             this.nothingPlayingAtMs = Date.now();
             return;
@@ -95,7 +106,8 @@ class Pauser {
         this.nothingPlayingAtMs = 0;
         // Timed because this is where the lag was. The model is about a second behind the room and
         // cannot be much faster, so anything on top of that shows up here.
-        log(`headphones off, paused ${result.changed.join(", ")} in ${Date.now() - startedAtMs}ms`);
+        const failed = result.failed.length > 0 ? `, failed on ${result.failed.join("; ")}` : "";
+        log(`headphones off, paused ${result.changed.join(", ")}${failed} in ${Date.now() - startedAtMs}ms`);
     }
 }
 
@@ -114,12 +126,12 @@ async function main() {
     // Started now rather than on the first pause. Standing powershell up is the expensive part, and
     // paying for it at the moment the headphones come off is exactly the wrong time.
     const startedAtMs = Date.now();
-    try {
-        const sessions = await listMediaSessions();
+    const status = await listMediaSessions();
+    if (status.error) {
+        log(`could not start the media host, will retry on the first pause: ${status.error}`);
+    } else {
+        const sessions = status.sessions;
         log(`media host ready in ${Date.now() - startedAtMs}ms, ${sessions.length} session${sessions.length === 1 ? "" : "s"} open`);
-    } catch (error) {
-        // Not fatal. It is retried on the first pause, and saying so beats dying over a warm up.
-        log(`could not start the media host: ${(error as Error).message}`);
     }
     log(`watching ${JSON.stringify(PHRASE)} at ${url}`);
 
@@ -131,10 +143,21 @@ async function main() {
             log(connected ? `connected` : `disconnected${reason ? `: ${reason}` : ""}, retrying`),
         onError: error => log(`${error.message}`),
     }).watch(PHRASE, {
-        onStart: () => { void pauser.on(); },
-        onStop: () => { void pauser.off(); },
+        onStart: () => {
+            pauser.on().catch(error => log(`resume failed: ${(error as Error).stack ?? error}`));
+        },
+        onStop: () => {
+            pauser.off().catch(error => log(`pause failed: ${(error as Error).stack ?? error}`));
+        },
     });
 }
+
+process.on("unhandledRejection", error => {
+    log(`unhandled rejection: ${(error as Error).stack ?? error}`);
+});
+process.on("uncaughtException", error => {
+    log(`uncaught exception: ${error.stack ?? error}`);
+});
 
 main().catch(error => {
     console.error(`[smartpause] failed:`, (error as Error).stack ?? error);

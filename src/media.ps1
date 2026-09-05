@@ -23,13 +23,41 @@ $asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-O
 
 function Await($operation, $resultType) {
     $task = $asTaskGeneric.MakeGenericMethod($resultType).Invoke($null, @($operation))
-    $task.Wait(-1) | Out-Null
-    return $task.Result
+    try {
+        return $task.GetAwaiter().GetResult()
+    } catch {
+        $inner = $_.Exception
+        while ($inner.InnerException) {
+            $inner = $inner.InnerException
+        }
+        throw $inner.Message
+    }
+}
+
+function Describe($record) {
+    $message = $record.Exception.Message
+    if ($record.Exception.InnerException) {
+        $message = $record.Exception.InnerException.Message
+    }
+    return "$message ($($record.InvocationInfo.PositionMessage.Trim() -replace '\s+', ' '))"
 }
 
 # The manager is live: GetSessions re-enumerates every call, so holding one across commands sees apps
 # that opened and closed since. Only the handshake to get it is expensive, and that is what is saved.
-$manager = Await ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager])
+$manager = $null
+$managerError = $null
+function Get-Manager {
+    if ($script:manager) {
+        return $script:manager
+    }
+    try {
+        $script:manager = Await ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager])
+        $script:managerError = $null
+    } catch {
+        $script:managerError = Describe $_
+    }
+    return $script:manager
+}
 $playing = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionPlaybackStatus]::Playing
 $paused = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionPlaybackStatus]::Paused
 
@@ -40,8 +68,12 @@ function Send($payload) {
     [Console]::Out.Flush()
 }
 
-# Says the setup finished, so a caller knows the expensive part is behind it rather than guessing.
-Send @{ ready = $true }
+Get-Manager | Out-Null
+if ($managerError) {
+    Send @{ ready = $true; warning = "media session manager unavailable, will retry per command: $managerError" }
+} else {
+    Send @{ ready = $true }
+}
 
 while ($null -ne ($line = [Console]::In.ReadLine())) {
     if (-not $line.Trim()) {
@@ -57,47 +89,46 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             $wanted = @($request.appIds)
         }
 
-        $changed = @()
-        $skipped = @()
-        $sessions = @()
-        foreach ($session in $manager.GetSessions()) {
-            $sessions += @{ appId = $session.SourceAppUserModelId; status = $session.GetPlaybackInfo().PlaybackStatus.ToString() }
-        }
-
-        if ($action -eq "pause") {
-            foreach ($session in $manager.GetSessions()) {
-                $appId = $session.SourceAppUserModelId
-                if ($session.GetPlaybackInfo().PlaybackStatus -ne $playing) {
-                    $skipped += $appId
-                    continue
-                }
-                if (Await ($session.TryPauseAsync()) ([bool])) {
-                    $changed += $appId
-                }
-            }
-        } elseif ($action -eq "play") {
-            foreach ($session in $manager.GetSessions()) {
-                $appId = $session.SourceAppUserModelId
-                if ($wanted -notcontains $appId) {
-                    continue
-                }
-                # Anything that is no longer paused was resumed by someone else, so leave it alone.
-                if ($session.GetPlaybackInfo().PlaybackStatus -ne $paused) {
-                    $skipped += $appId
-                    continue
-                }
-                if (Await ($session.TryPlayAsync()) ([bool])) {
-                    $changed += $appId
-                }
-            }
-        } elseif ($action -ne "status") {
+        if ($action -ne "status" -and $action -ne "pause" -and $action -ne "play") {
             throw "unknown action $action"
         }
+        $current = Get-Manager
+        if (-not $current) {
+            throw "media session manager unavailable: $managerError"
+        }
 
-        Send @{ id = $id; changed = @($changed); skipped = @($skipped); sessions = @($sessions) }
+        $changed = @()
+        $skipped = @()
+        $failed = @()
+        $sessions = @()
+        foreach ($session in $current.GetSessions()) {
+            $appId = $session.SourceAppUserModelId
+            try {
+                $status = $session.GetPlaybackInfo().PlaybackStatus
+                $sessions += @{ appId = $appId; status = $status.ToString() }
+                if ($action -eq "pause") {
+                    if ($status -ne $playing) {
+                        $skipped += $appId
+                    } elseif (Await ($session.TryPauseAsync()) ([bool])) {
+                        $changed += $appId
+                    }
+                } elseif ($action -eq "play" -and $wanted -contains $appId) {
+                    # Anything that is no longer paused was resumed by someone else, so leave it alone.
+                    if ($status -ne $paused) {
+                        $skipped += $appId
+                    } elseif (Await ($session.TryPlayAsync()) ([bool])) {
+                        $changed += $appId
+                    }
+                }
+            } catch {
+                $failed += "$appId ($(Describe $_))"
+            }
+        }
+
+        Send @{ id = $id; changed = @($changed); skipped = @($skipped); failed = @($failed); sessions = @($sessions) }
     } catch {
         # Reported rather than thrown, so one bad command does not take the host down and make the
         # next pause pay the whole startup again.
-        Send @{ id = $id; error = $_.Exception.Message }
+        Send @{ id = $id; error = (Describe $_) }
     }
 }
