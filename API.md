@@ -84,8 +84,21 @@ sits on disk and can wait; the room cannot.
 
 A delivery is a moment, not a state, so the phrase pulses: on in the round that reports it, off in
 the next. A watcher sees exactly one start per delivery and nothing on reconnect. The entry carrying
-it also says which clip and which frame decided it, under `delivery`. The verdict for every clip,
-delivery or not, is written beside it as `<clip>.delivery.json` so a restart never judges one twice.
+it also says which clip and which frame decided it, under `delivery`.
+
+Every clip judged is written down in full, twice: beside the clip as `<clip>.delivery.json`, which
+is what stops a restart judging it again, and appended to `doorclips/verdicts.jsonl`, which is the
+whole history in one file in order. A record holds how many frames the clip had, which were chosen,
+and exactly what the model said about each one asked, verbatim and timed:
+
+    {"clip":"2026-09-04/13-08-41_1788541731420.mp4","delivery":true,"frame":"013.jpg",
+     "frames":20,"selected":["009.jpg","013.jpg"],
+     "answers":[{"frame":"009.jpg","answer":"no","yes":false,"ms":642},
+                {"frame":"013.jpg","answer":"yes","yes":true,"ms":711}]}
+
+There are few clips and fewer deliveries, so there is no watching this happen; the record is the
+only way a wrong verdict gets understood. A clip that could not be read is written there too, with
+its error, because one that silently vanished would be the hardest miss to notice.
 
 `yarn watchdeliveries` is the client: it subscribes to that phrase the way smartpause subscribes to
 the headphones and shows a Windows balloon for each one.
