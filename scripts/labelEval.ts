@@ -194,8 +194,22 @@ async function main() {
         throw new Error(`No prompt called ${promptName}. Have: ${Object.keys(PROMPTS).join(", ")}`);
     }
     const negatives = Number(value("--negatives", "40"));
-    const width = Number(value("--width", "896"));
-    const height = Number(value("--height", "504"));
+    /**
+     * 768x432, measured. The whole archive against every hand label, peak frame selection, one run
+     * each:
+     *
+     *     896x504   693ms   30/30   35 false of 444
+     *     768x432   568ms   30/30   35 false of 444
+     *     640x360   437ms   29/30   30 false of 444
+     *     512x288   377ms   29/30   32 false of 444
+     *
+     * 768 is free: the same deliveries and the same false alarms for 18% less time. Below it recall
+     * breaks, and both smaller sizes break on the same clip, the thinnest delivery in the set at four
+     * matching frames of twenty two. So the floor is not a gradual blur, it is one hard case going
+     * under, which is worth knowing: a second thin delivery would probably go at 768 too.
+     */
+    const width = Number(value("--width", "768"));
+    const height = Number(value("--height", "432"));
     // A clip is a delivery the moment one frame says so, so the rest of its frames say nothing new.
     // Only skipping is honest here: it changes what a positive costs, never whether it is found.
     const stopEarly = !argv.includes("--all-frames");
