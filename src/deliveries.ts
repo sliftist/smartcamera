@@ -37,7 +37,28 @@ const DAY_FOLDER = /^\d{4}-\d{2}-\d{2}$/;
 const SCAN_MS = 15 * 1000;
 /** Clips older than this at startup are not judged: the person has long since gone. */
 const CATCH_UP_MS = 6 * 60 * 60 * 1000;
+/**
+ * One line per clip judged, appended forever, beside the clips.
+ *
+ * The verdict beside each clip is what stops it being judged twice; this is the same facts in one
+ * place, in order, so the whole history reads as a single file rather than a find across day
+ * folders. Clips that could not be read are written here too, since a clip that silently vanished
+ * from the record would be the hardest kind of miss to notice.
+ */
+const LEDGER = "verdicts.jsonl";
 
+/** One frame's answer, kept whole. The raw text is what lets a wrong verdict be understood later. */
+export type FrameAnswer = { frame: string; answer: string; yes: boolean; ms: number };
+
+/**
+ * Everything about how a clip was judged, not just the judgement.
+ *
+ * There will only ever be a handful of clips a day and very few deliveries among them, so there is
+ * no chance to debug this by watching it happen. Each verdict therefore carries the whole story:
+ * how many frames the clip had, which ones were chosen, and exactly what the model said about each
+ * one that was asked, in order. A miss can then be traced to a frame that was never chosen or a
+ * frame that was chosen and answered wrongly, which are different fixes.
+ */
 export type Verdict = {
     clip: string;
     /** The clip's peak time, its identity everywhere else. */
@@ -45,6 +66,12 @@ export type Verdict = {
     delivery: boolean;
     /** The frame that decided it, when it was a delivery. */
     frame?: string;
+    /** How many frames the clip had, one a second. */
+    frames: number;
+    /** The frames chosen to be asked about, whether or not all were reached. */
+    selected: string[];
+    /** Every frame actually asked, in order, with what came back. */
+    answers: FrameAnswer[];
     asked: number;
     at: number;
 };
@@ -56,6 +83,8 @@ type Pending = {
     frames: ClipFrames;
     /** Indices into frames still to be asked about, in order. */
     remaining: number[];
+    selected: string[];
+    answers: FrameAnswer[];
     asked: number;
 };
 
@@ -154,11 +183,24 @@ export class DeliveryWatcher {
             }
         } catch (error) {
             this.log(`door clip ${day}/${file} could not be read: ${(error as Error).message}`);
+            // Written down, not just said. A clip that silently vanished from the record would be
+            // the hardest kind of miss to ever notice.
+            this.record({ clip: `${day}/${file}`, t, error: (error as Error).message, at: Date.now() });
             return;
         }
         const remaining = selectFrames(frames.grids);
-        this.log(`door clip ${day}/${file}: asking about ${remaining.length} of ${frames.frames.length} frames`);
-        this.queue.push({ day, file, t, frames, remaining, asked: 0 });
+        const selected = remaining.map(index => frames.frames[index]);
+        this.log(`door clip ${day}/${file}: ${frames.frames.length} frames, asking about ${selected.join(" ")}`);
+        this.queue.push({ day, file, t, frames, remaining, selected, answers: [], asked: 0 });
+    }
+
+    /** Appends one line to the ledger. Failing to write it is said, never allowed to stop a verdict. */
+    private record(line: Record<string, unknown>) {
+        try {
+            fs.appendFileSync(path.join(this.clipRoot, LEDGER), `${JSON.stringify(line)}\n`);
+        } catch (error) {
+            this.log(`could not append to ${LEDGER}: ${(error as Error).message}`);
+        }
     }
 
     /**
@@ -181,6 +223,7 @@ export class DeliveryWatcher {
         const jpeg = fs.readFileSync(path.join(this.frameRoot, clip.day, clip.file.replace(/\.mp4$/, ""), name));
         clip.asked++;
         let answer: string;
+        const startedAtMs = Date.now();
         try {
             answer = await this.askImage(jpeg, DELIVERY_PROMPT, DELIVERY_WIDTH, DELIVERY_HEIGHT);
         } catch (error) {
@@ -190,7 +233,13 @@ export class DeliveryWatcher {
             this.log(`door clip ${clip.day}/${clip.file}: asking failed, will retry: ${(error as Error).message}`);
             return undefined;
         }
-        if (saidYes(answer)) {
+        const yes = saidYes(answer);
+        // Every answer, verbatim, one line each. There are few enough clips that this is cheap and
+        // few enough deliveries that it is the only record of what the model actually said.
+        clip.answers.push({ frame: name, answer, yes, ms: Date.now() - startedAtMs });
+        this.log(`door clip ${clip.day}/${clip.file}: ${name} -> ${JSON.stringify(answer)}`
+            + ` (${yes ? "yes" : "no"}, ${Date.now() - startedAtMs}ms)`);
+        if (yes) {
             // One frame is enough. Everything after it could only agree.
             return this.settle(clip, true, name);
         }
@@ -202,12 +251,23 @@ export class DeliveryWatcher {
 
     private settle(clip: Pending, delivery: boolean, frame?: string): Verdict {
         this.current = undefined;
-        const verdict: Verdict = { clip: `${clip.day}/${clip.file}`, t: clip.t, delivery, frame, asked: clip.asked, at: Date.now() };
+        const verdict: Verdict = {
+            clip: `${clip.day}/${clip.file}`,
+            t: clip.t,
+            delivery,
+            frame,
+            frames: clip.frames.frames.length,
+            selected: clip.selected,
+            answers: clip.answers,
+            asked: clip.asked,
+            at: Date.now(),
+        };
         try {
             fs.writeFileSync(this.verdictPath(clip.day, clip.file), `${JSON.stringify(verdict)}\n`);
         } catch (error) {
             this.log(`could not record the verdict for ${verdict.clip}: ${(error as Error).message}`);
         }
+        this.record(verdict);
         this.judged++;
         if (delivery) {
             this.found++;
