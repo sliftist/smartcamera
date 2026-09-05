@@ -4,7 +4,8 @@ import * as path from "path";
 import { WebSocketServer, WebSocket } from "ws";
 import { formatDateTime } from "socket-function/src/formatting/format";
 import { dayStamp, millisecondStamp } from "./src/timestamps";
-import { buildPrompt, parseAnswers, diffAnswers, parseWatch, canonicalPhrase, DEFAULT_WATCHES, MAX_QUESTIONS, MAX_PHRASE_LENGTH, Watch } from "./src/questions";
+import { buildPrompt, parseAnswers, diffAnswers, parseWatch, canonicalPhrase, DEFAULT_WATCHES, DELIVERY_PHRASE, MAX_QUESTIONS, MAX_PHRASE_LENGTH, Watch } from "./src/questions";
+import { DeliveryWatcher, Verdict } from "./src/deliveries";
 import { readPassword, writePassword, passwordMatches, offeredPassword } from "./src/password";
 import { isLocalAddress } from "./src/network";
 import { readHistory, summarise } from "./src/history";
@@ -21,6 +22,9 @@ const HOST = "0.0.0.0";
 const DEFAULT_INTERVAL_SECONDS = 0;
 const DEFAULT_INDEX = 0;
 const LOG_DIRECTORY = path.join(__dirname, "actions");
+/** Where doorsync puts the door camera's clips, and where their frames go once looked at. */
+const DOOR_CLIP_ROOT = path.join(__dirname, "doorclips");
+const DOOR_FRAME_ROOT = path.join(__dirname, "doorframes");
 /** Kept in memory for a new page and the feed; the day files on disk hold everything. */
 const RECENT_LIMIT = 500;
 /** What a joining page is shown before live rounds start arriving. */
@@ -79,6 +83,8 @@ type Entry = {
     unknown?: string[];
     /** Exactly what the model said, so a parsing decision can always be second guessed later. */
     raw?: string;
+    /** Which door clip a reported delivery came from, and the frame that decided it. */
+    delivery?: { clip: string; t: number; frame?: string };
     promptTokens?: number;
     outputTokens?: number;
     /** Decoding the frame, which is the only part that is not the model. */
@@ -128,6 +134,14 @@ class Recorder {
     private comparison: ComparisonRun | undefined;
     private listeners = new Set<Listener>();
     private frames: BufferedFrame[] = [];
+    /**
+     * Set when the door camera has just been found to show a delivery, and cleared by the round that
+     * reports it. The phrase is on for exactly one round, which is what makes it an event a watcher
+     * sees once rather than a state that would fire on every reconnect.
+     */
+    private deliveryToReport: Verdict | undefined;
+    private deliveryShown = false;
+    deliveries: DeliveryWatcher | undefined;
     rounds = 0;
     failures = 0;
     framesMissing = 0;
@@ -158,6 +172,13 @@ class Recorder {
         return this.phrases;
     }
 
+    /** A door clip was judged. Only a delivery is reported; the next round carries it. */
+    reportDelivery(verdict: Verdict) {
+        if (verdict.delivery) {
+            this.deliveryToReport = verdict;
+        }
+    }
+
     /**
      * Returns the list as it now stands, so a caller sees the result of its own call.
      *
@@ -172,6 +193,11 @@ class Recorder {
      */
     addWatch(phrase: string): Watch[] {
         const watch = parseWatch(phrase);
+        // Always on and never asked of the camera, so registering it is a no-op rather than a tenth
+        // question. See DELIVERY_PHRASE.
+        if (watch.phrase === DELIVERY_PHRASE) {
+            return this.listWatches();
+        }
         if (this.watches.some(candidate => candidate.phrase === watch.phrase)) {
             return this.listWatches();
         }
@@ -508,13 +534,28 @@ class Recorder {
         const before = this.yes.filter(phrase => answered.includes(phrase));
         const { added, removed } = diffAnswers(before, yes);
         const unanswered = this.phrases.filter(phrase => !answered.includes(phrase));
+        const state = this.phrases.filter(phrase =>
+            yes.includes(phrase) || (unanswered.includes(phrase) && this.yes.includes(phrase)));
+        // The delivery phrase pulses: on in the round that reports it, off in the next. It is added
+        // and removed here by hand because the model was never asked about it, and a watcher sees
+        // exactly one start and one stop per delivery.
+        const reporting = this.deliveryToReport;
+        if (reporting) {
+            state.push(DELIVERY_PHRASE);
+            added.push(DELIVERY_PHRASE);
+            this.deliveryToReport = undefined;
+            this.deliveryShown = true;
+        } else if (this.deliveryShown) {
+            removed.push(DELIVERY_PHRASE);
+            this.deliveryShown = false;
+        }
         const entry: Entry = {
             at,
             // A skipped phrase keeps its last answer rather than flapping to no and back.
-            state: this.phrases.filter(phrase =>
-                yes.includes(phrase) || (unanswered.includes(phrase) && this.yes.includes(phrase))),
+            state,
             added,
             removed,
+            delivery: reporting ? { clip: reporting.clip, t: reporting.t, frame: reporting.frame } : undefined,
             unanswered,
             unknown,
             raw,
@@ -555,9 +596,10 @@ class Recorder {
             /** Split into question and word, for anything that wants the parts rather than the whole. */
             watches: this.listWatches(),
             /** The phrases being watched, word and all. What an entry reports is one of these. */
-            phrases: this.listPhrases(),
+            phrases: [...this.listPhrases(), ...(this.deliveries ? [DELIVERY_PHRASE] : [])],
             /** So the page can show which are permanent, and offer no way to remove those. */
-            defaults: DEFAULT_WATCHES.map(watch => watch.phrase),
+            defaults: [...DEFAULT_WATCHES.map(watch => watch.phrase), ...(this.deliveries ? [DELIVERY_PHRASE] : [])],
+            deliveries: this.deliveries ? { judged: this.deliveries.judged, found: this.deliveries.found, busy: this.deliveries.busy } : undefined,
             yes: [...this.yes],
             // Sent so the wording can be reviewed against the answers it is producing, live.
             prompt: buildPrompt(this.watches),
@@ -1373,18 +1415,46 @@ async function main() {
     const args = process.argv.slice(2);
     let intervalSeconds = DEFAULT_INTERVAL_SECONDS;
     let index = DEFAULT_INDEX;
+    let watchDeliveries = false;
     for (let position = 0; position < args.length; position++) {
         if (args[position] === "--every") {
             intervalSeconds = Number(args[++position]);
         } else if (args[position] === "--index") {
             index = Number(args[++position]);
+        } else if (args[position] === "--deliveries") {
+            watchDeliveries = true;
         } else {
-            console.error(`Unknown argument ${args[position]}; known are --every and --index`);
+            console.error(`Unknown argument ${args[position]}; known are --every, --index and --deliveries`);
             process.exit(1);
         }
     }
 
     const recorder = new Recorder(index);
+    if (watchDeliveries) {
+        // Frames are sent to eye2 as jpegs and judged there, on the same single lane as the room,
+        // so there is never more than one thing on the gpu and the two take turns.
+        recorder.deliveries = new DeliveryWatcher(
+            DOOR_CLIP_ROOT,
+            DOOR_FRAME_ROOT,
+            async (jpeg, prompt, width, height) => {
+                const response = await fetch(`${EYE2_URL}/image`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ image: jpeg.toString("base64"), prompt, width, height }),
+                    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+                });
+                const reply = await response.json() as { answer?: string; error?: string };
+                if (typeof reply.error === "string") {
+                    throw new Error(reply.error);
+                }
+                return String(reply.answer ?? "");
+            },
+            verdict => recorder.reportDelivery(verdict),
+            log,
+        );
+        recorder.deliveries.start();
+        log(`watching ${DOOR_CLIP_ROOT} for new door clips, taking turns with the room`);
+    }
 
     // Re-read per request, so setting or clearing a password takes effect without a restart.
     const authorised = (request: http.IncomingMessage, url: URL) =>
@@ -1565,8 +1635,8 @@ async function main() {
             if (request.method === "GET") {
                 send(200, {
                     watches: recorder.listWatches(),
-                    phrases: recorder.listPhrases(),
-                    defaults: DEFAULT_WATCHES.map(watch => watch.phrase),
+                    phrases: recorder.state.phrases,
+                    defaults: recorder.state.defaults,
                 });
                 return;
             }
@@ -1700,6 +1770,16 @@ async function main() {
     while (true) {
         const startedAtMs = Date.now();
         const answered = await recorder.round();
+        // The room first, then one frame of a door clip if any is waiting, then the room again. The
+        // room is live and this is not, so the clips fill the gaps between rounds rather than
+        // competing for them, and a backlog of clips slows the room by at most half.
+        if (answered && recorder.deliveries?.busy) {
+            try {
+                await recorder.deliveries.turn();
+            } catch (error) {
+                log(`door clip turn failed: ${(error as Error).message}`);
+            }
+        }
         // A failed round returns in milliseconds, so with no interval set this loop would spin at the
         // speed of the failure: thousands of requests and log lines a minute while the model is down,
         // which is what it did while llama.cpp was wedged. Backing off keeps a broken model quiet and

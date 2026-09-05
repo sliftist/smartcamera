@@ -4,6 +4,8 @@ import * as path from "path";
 import { pathToFileURL } from "url";
 import { formatDateTime } from "socket-function/src/formatting/format";
 import { encodeJpeg } from "./src/jpeg";
+import { decode as decodeJpeg } from "jpeg-js";
+import { RgbImage } from "./src/yolo";
 import { redactUrl, StreamTarget } from "./src/credentials";
 import { RtspClient } from "./src/rtsp";
 import { AccessUnit, H264Depacketizer, isKeyframe, nalType, parseParameterSets, parseSps, toAnnexB, NAL_TYPE_PPS, NAL_TYPE_SPS } from "./src/h264";
@@ -64,6 +66,15 @@ type Request = {
     prompt: string;
     /** When set, the same frame is also asked at this size and both answers come back. */
     compare?: { width: number; height: number };
+    resolve: (result: Record<string, unknown>) => void;
+    reject: (error: Error) => void;
+};
+
+/** A question about an image the caller supplied, rather than one from a camera. */
+type ImageRequest = {
+    image: RgbImage;
+    prompt: string;
+    budget?: { width: number; height: number };
     resolve: (result: Record<string, unknown>) => void;
     reject: (error: Error) => void;
 };
@@ -340,6 +351,9 @@ class ViewWatcher {
 class Server {
     private watchers: ViewWatcher[] = [];
     private pending = new Map<number, Request[]>();
+    /** Questions about supplied images, kept apart so the camera and the caller take turns. */
+    private pendingImages: ImageRequest[] = [];
+    private lastWasImage = false;
     private working = false;
     private frameNumber = 0;
 
@@ -374,13 +388,57 @@ class Server {
         try {
             while (true) {
                 const index = [...this.pending.keys()].find(key => (this.pending.get(key)?.length ?? 0) > 0);
-                if (index === undefined) {
+                const image = this.pendingImages.length > 0;
+                if (index === undefined && !image) {
                     return;
                 }
-                await this.runBatch(index);
+                // Strictly alternating when both are waiting. The camera is live and cannot be made
+                // to wait long; a clip on disk can wait forever, but a backlog of it must not be
+                // allowed to starve the room either. One each, turn about, is the whole policy.
+                if (image && (index === undefined || !this.lastWasImage)) {
+                    this.lastWasImage = true;
+                    await this.runImage(this.pendingImages.shift()!);
+                    continue;
+                }
+                this.lastWasImage = false;
+                await this.runBatch(index!);
             }
         } finally {
             this.working = false;
+        }
+    }
+
+    /**
+     * A question about an image the caller already has, rather than about a camera.
+     *
+     * Goes through the same single lane as the cameras, so there is never more than one thing on
+     * the gpu, and takes its turn against them rather than cutting in. Used for the door clips,
+     * which arrive as files and are asked about one chosen frame at a time.
+     */
+    askImage(image: RgbImage, prompt: string, budget?: { width: number; height: number }): Promise<Record<string, unknown>> {
+        return new Promise((resolve, reject) => {
+            this.pendingImages.push({ image, prompt, budget, resolve, reject });
+            void this.pump();
+        });
+    }
+
+    private async runImage(request: ImageRequest) {
+        try {
+            const result = await this.client.ask(request.image, request.prompt, undefined, request.budget);
+            log(`image ${request.image.width}x${request.image.height}`
+                + `${request.budget ? ` shown at ${request.budget.width}x${request.budget.height}` : ""}`
+                + ` -> ${result.answer || "(empty)"}  ${result.modelMs.toFixed(0)}ms`);
+            request.resolve({
+                answer: result.answer,
+                visionMs: result.visionMs,
+                prefillMs: result.prefillMs,
+                generateMs: result.generateMs,
+                analyzeMs: result.modelMs,
+                promptTokens: result.promptTokens,
+                outputTokens: result.outputTokens,
+            });
+        } catch (error) {
+            request.reject(error as Error);
         }
     }
 
@@ -544,13 +602,21 @@ class Server {
     }
 }
 
+/**
+ * Enough for a jpeg frame as base64 with room to spare, since /image carries one. A 1280x720 frame is
+ * around 150KB and base64 makes it 200KB; anything near this cap is not a frame from this camera.
+ */
+const MAX_BODY_BYTES = 4 * 1024 * 1024;
+
 function readBody(request: http.IncomingMessage): Promise<string> {
     return new Promise((resolve, reject) => {
         let body = "";
         request.on("data", chunk => {
             body += chunk;
-            if (body.length > MAX_PROMPT_LENGTH * 4) {
+            if (body.length > MAX_BODY_BYTES) {
                 reject(new Error(`The request body is too large`));
+                // Stop reading rather than keep buffering something already refused.
+                request.destroy();
             }
         });
         request.on("end", () => resolve(body));
@@ -674,6 +740,39 @@ async function main() {
                     const jpeg = await server.frame(Number(rawFrameIndex));
                     response.writeHead(200, { "Content-Type": "image/jpeg", "Content-Length": jpeg.length });
                     response.end(jpeg);
+                    return;
+                }
+                // A question about a jpeg the caller sends, for the door clips. It waits its turn
+                // behind whatever camera round is in progress and never runs alongside one.
+                if (url.pathname === "/image") {
+                    if (request.method !== "POST") {
+                        send(405, { error: `POST a json body with image (base64 jpeg), prompt, and optional width and height` });
+                        return;
+                    }
+                    const parameters = await readParameters(request, url);
+                    const prompt = String(parameters.prompt ?? "").trim();
+                    if (!prompt || prompt.length > MAX_PROMPT_LENGTH) {
+                        send(400, { error: `prompt is required and must be at most ${MAX_PROMPT_LENGTH} characters` });
+                        return;
+                    }
+                    let image: RgbImage;
+                    try {
+                        const raw = decodeJpeg(Buffer.from(String(parameters.image ?? ""), "base64"), { useTArray: true });
+                        const rgb = Buffer.alloc(raw.width * raw.height * 3);
+                        for (let i = 0, at = 0; i < raw.width * raw.height; i++) {
+                            rgb[at++] = raw.data[i * 4];
+                            rgb[at++] = raw.data[i * 4 + 1];
+                            rgb[at++] = raw.data[i * 4 + 2];
+                        }
+                        image = { width: raw.width, height: raw.height, rgb };
+                    } catch {
+                        send(400, { error: `image must be a base64 jpeg` });
+                        return;
+                    }
+                    const width = Number(parameters.width);
+                    const height = Number(parameters.height);
+                    const budget = width > 0 && height > 0 ? { width, height } : undefined;
+                    send(200, await server.askImage(image, prompt, budget));
                     return;
                 }
                 const parameters = await readParameters(request, url);

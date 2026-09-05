@@ -1,0 +1,19 @@
+[Unit]
+Description=eye actions: what is happening, recorded and served
+After=eye2.service
+Wants=eye2.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/eye/smartcamera
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/usr/bin/typenode ./actions.ts --deliveries
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

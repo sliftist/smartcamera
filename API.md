@@ -67,6 +67,29 @@ lookup table in its head to use one, where "drinking" it can simply reason about
 wrong answer legible. A stray letter tells you nothing; a stray word tells you what it thought it
 saw, which is why words that were never offered are kept and shown on the row rather than dropped.
 
+## Deliveries
+
+One phrase is never asked of the room camera:
+
+    package delivery at the door (delivery)
+
+It comes from the door camera instead. Started with `--deliveries`, the service watches the clips
+doorsync brings down, takes one frame a second from each new one, chooses the few frames where
+somebody was actually in the hallway, and asks the model about those at 768x432. Every one of those
+choices was measured against the hand labelled archive and each still finds all thirty deliveries.
+
+The room goes first. A clip's frames are asked one at a time, each in the gap after a room round, so
+the two take turns on the one model and a backlog of clips slows the room by at most half. The clip
+sits on disk and can wait; the room cannot.
+
+A delivery is a moment, not a state, so the phrase pulses: on in the round that reports it, off in
+the next. A watcher sees exactly one start per delivery and nothing on reconnect. The entry carrying
+it also says which clip and which frame decided it, under `delivery`. The verdict for every clip,
+delivery or not, is written beside it as `<clip>.delivery.json` so a restart never judges one twice.
+
+`yarn watchdeliveries` is the client: it subscribes to that phrase the way smartpause subscribes to
+the headphones and shows a Windows balloon for each one.
+
 ## Subscribing
 
 A websocket on the same port and path as the page. Three message shapes, all JSON:

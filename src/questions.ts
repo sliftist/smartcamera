@@ -55,6 +55,17 @@ export const DEFAULT_PHRASES = [
 /** Named because smartpause watches exactly this one, so a reword here cannot orphan it there. */
 export const HEADPHONES_PHRASE = "is anyone wearing headphones (headphones)";
 
+/**
+ * The one phrase that is never asked of the camera.
+ *
+ * A delivery is found by looking at the door camera's clips, not at the room, and it is a moment
+ * rather than a state: it happened, and then it is over. It still surfaces as a phrase, pulsing on
+ * for one round and off the next, so that anything already able to watch a phrase can watch this
+ * one without learning a second mechanism. It is accepted by name like a default and never put in
+ * the prompt.
+ */
+export const DELIVERY_PHRASE = "package delivery at the door (delivery)";
+
 export const MAX_QUESTIONS = 26;
 export const MAX_PHRASE_LENGTH = 140;
 export const MAX_KEYWORD_LENGTH = 24;
