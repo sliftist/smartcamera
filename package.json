@@ -65,7 +65,9 @@
         "doorsync": "typenode ./doorsync.ts",
         "doorlabel": "typenode ./doorlabel.ts",
         "frames": "typenode ./scripts/extractFrames.ts",
-        "eval": "typenode ./scripts/labelEval.ts"
+        "eval": "typenode ./scripts/labelEval.ts",
+        "framestats": "typenode ./scripts/frameStats.ts",
+        "frameselect": "typenode ./scripts/frameSelect.ts"
     },
     "dependencies": {
         "cbor-x": "^1.6.6",

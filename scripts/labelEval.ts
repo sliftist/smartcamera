@@ -3,6 +3,8 @@ import * as path from "path";
 import { decode as decodeJpeg } from "jpeg-js";
 import { LlamaAskClient } from "../src/askLlama";
 import { RgbImage } from "../src/yolo";
+import { SELECTORS } from "./frameSelect";
+import { statsPath } from "./frameStats";
 
 /**
  * Can the model find the deliveries that were labelled by hand?
@@ -197,10 +199,25 @@ async function main() {
     // A clip is a delivery the moment one frame says so, so the rest of its frames say nothing new.
     // Only skipping is honest here: it changes what a positive costs, never whether it is found.
     const stopEarly = !argv.includes("--all-frames");
+    // Ask about a chosen few frames rather than all of them. The choice is made from the cheap grey
+    // thumbnails, without the model, so the saving is real: the frames never asked about cost nothing.
+    const selector = value("--select", "");
 
-    const clips = pick(loadClips(), negatives);
+    let clips = pick(loadClips(), negatives);
+    if (selector) {
+        const choose = SELECTORS[selector];
+        if (!choose) {
+            throw new Error(`No selector called ${selector}. Have: ${Object.keys(SELECTORS).join(", ")}`);
+        }
+        clips = clips.map(clip => {
+            const stem = clip.file.replace(/\.mp4$/, "");
+            const stats = JSON.parse(fs.readFileSync(statsPath(clip.day, stem), "utf8")) as { grids: number[][] };
+            const chosen = new Set(choose(stats.grids));
+            return { ...clip, frames: clip.frames.filter((_, at) => chosen.has(at)) };
+        });
+    }
     const totalFrames = clips.reduce((sum, clip) => sum + clip.frames.length, 0);
-    console.log(`prompt "${promptName}" at ${width}x${height}`);
+    console.log(`prompt "${promptName}" at ${width}x${height}${selector ? `, frames chosen by "${selector}"` : ""}`);
     console.log(prompt.split("\n").map(line => `    ${line}`).join("\n"));
     console.log(`${clips.length} clips (${clips.filter(c => c.labels.length > 0).length} deliveries),`
         + ` up to ${totalFrames} frames\n`);
@@ -208,26 +225,30 @@ async function main() {
     const model = new LlamaAskClient(path.join(__dirname, ".."), message => console.log(`    [model] ${message}`));
     await model.start();
 
-    const rows: { clip: Clip; found: boolean; atFrame: string | undefined; asked: number }[] = [];
+    const rows: { clip: Clip; found: boolean; atFrame: string | undefined; asked: number; hits: string[] }[] = [];
     let asked = 0;
     const startedAtMs = Date.now();
     for (const clip of clips) {
         let found = false;
         let atFrame: string | undefined;
         let count = 0;
+        // Every frame that matched, not just the first. How many frames carry a delivery is what says
+        // whether the answer is solid or hanging on a single lucky look, and only a full pass knows.
+        const hits: string[] = [];
         for (const name of clip.frames) {
             count++;
             asked++;
             const result = await model.ask(readFrame(clip, name), prompt, MAX_NEW_TOKENS, { width, height });
             if (saidYes(result.answer)) {
                 found = true;
-                atFrame = name;
+                hits.push(name);
+                atFrame = atFrame ?? name;
                 if (stopEarly) {
                     break;
                 }
             }
         }
-        rows.push({ clip, found, atFrame, asked: count });
+        rows.push({ clip, found, atFrame, asked: count, hits });
         const truth = clip.labels.length > 0;
         if (truth !== found) {
             console.log(`  ${truth && !found ? "MISSED " : "false +"} ${clip.day} ${clip.file}`
@@ -250,15 +271,35 @@ async function main() {
     console.log(`  ${asked} frames in ${(elapsedMs / 1000).toFixed(0)}s, ${Math.round(elapsedMs / Math.max(1, asked))}ms each`);
 
     fs.mkdirSync(RESULT_ROOT, { recursive: true });
-    const target = path.join(RESULT_ROOT, `${promptName}-${width}x${height}.json`);
+    const target = path.join(RESULT_ROOT, `${promptName}-${width}x${height}${selector ? `-${selector}` : ""}.json`);
     fs.writeFileSync(target, JSON.stringify({
         prompt: promptName, text: prompt, width, height, negatives,
         recall, precision, truePositive, falseNegative, falsePositive, trueNegative,
         msPerFrame: Math.round(elapsedMs / Math.max(1, asked)),
         missed: rows.filter(row => row.clip.labels.length > 0 && !row.found).map(row => `${row.clip.day}/${row.clip.file}`),
         alarms: rows.filter(row => row.clip.labels.length === 0 && row.found).map(row => `${row.clip.day}/${row.clip.file} at ${row.atFrame}`),
+        clips: rows.map(row => ({
+            clip: `${row.clip.day}/${row.clip.file}`,
+            delivery: row.clip.labels.length > 0,
+            frames: row.clip.frames.length,
+            asked: row.asked,
+            hits: row.hits,
+        })),
     }, null, 2));
     console.log(`  written to ${path.relative(process.cwd(), target)}`);
+
+    if (!stopEarly) {
+        // How thin the answer is. A clip resting on one frame would have been a coin toss, so this is
+        // the number that says whether the one frame rule is comfortable or lucky.
+        const found = rows.filter(row => row.clip.labels.length > 0 && row.found);
+        const thin = found.slice().sort((left, right) => left.hits.length - right.hits.length);
+        console.log(`\n  matching frames per delivery, fewest first:`);
+        for (const row of thin.slice(0, 8)) {
+            console.log(`    ${String(row.hits.length).padStart(3)} of ${String(row.clip.frames.length).padStart(3)}`
+                + `   ${row.clip.day} ${row.clip.file}`);
+        }
+        console.log(`    deliveries resting on a single frame: ${found.filter(row => row.hits.length === 1).length}`);
+    }
 
     model.stop();
     process.exit(0);
