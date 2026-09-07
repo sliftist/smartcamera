@@ -7,20 +7,29 @@ import { EyeClient, EyeEntry } from "./src/eyeClient";
 import { DELIVERY_PHRASE } from "./src/questions";
 
 /**
- * Shows a notification when a package is delivered at the door.
+ * Shows a notification, with a picture, when a package is delivered at the door.
  *
  * The finding happens elsewhere: the actions service watches the door camera's clips and, when one
- * shows a delivery, pulses a phrase on for a single round. This subscribes to that phrase exactly
- * the way smartpause subscribes to the headphones, and turns each start into a Windows balloon. It
- * is its own script rather than a branch inside smartpause because the two have nothing in common
- * beyond the client, and either should be runnable without the other.
+ * shows a delivery, pulses a phrase on for a single round and names the best frame of it. This
+ * subscribes to that phrase exactly the way smartpause subscribes to the headphones, fetches that
+ * frame, and puts it up as a Windows toast with the picture across the top. It is its own script
+ * rather than a branch inside smartpause because the two have nothing in common beyond the client.
  */
 
 /** The same fixed place smartpause reads from, so one file serves both. */
 const PASSWORD_FILE = path.join(os.homedir(), "smartcamerapassword.txt");
 const PASSWORD_POLL_MS = 5000;
-/** How long the balloon stays. Long enough to be noticed from across the room, short enough not to nag. */
+/** Where fetched frames go. Windows needs a real file to show; it will not take bytes. */
+const IMAGE_FOLDER = path.join(os.tmpdir(), "smartcamera-deliveries");
+/**
+ * Whose toasts these are. A toast has to come from something Windows knows, and a script is not
+ * something Windows knows. This is the id it gives powershell itself, which is what actually runs
+ * the call, so the toast shows and is filed under "Windows PowerShell" in the notification centre.
+ */
+const TOAST_APP_ID = `{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe`;
 const BALLOON_MS = 15_000;
+
+type Delivery = { clip?: string; t?: number; frame?: string; image?: string };
 
 function log(message: string) {
     console.log(`${formatDateTime(Date.now())} | ${message}`);
@@ -37,26 +46,8 @@ async function readPassword(): Promise<string> {
     }
 }
 
-/**
- * A Windows balloon, through powershell.
- *
- * Borrowed from the toaster script in the smart repo, which is the one thing here known to reliably
- * put a notification on this desktop. The script is handed to powershell on stdin rather than on
- * the command line, so a title with a quote in it cannot break out of anything.
- */
-function notify(title: string, message: string): Promise<void> {
-    const escape = (text: string) => text.replace(/'/g, "''");
-    const script = [
-        `Add-Type -AssemblyName System.Windows.Forms`,
-        `$balloon = New-Object System.Windows.Forms.NotifyIcon`,
-        `$balloon.Icon = [System.Drawing.SystemIcons]::Information`,
-        `$balloon.BalloonTipTitle = '${escape(title)}'`,
-        `$balloon.BalloonTipText = '${escape(message)}'`,
-        `$balloon.Visible = $true`,
-        `$balloon.ShowBalloonTip(${BALLOON_MS})`,
-        `Start-Sleep -Milliseconds ${BALLOON_MS}`,
-        `$balloon.Dispose()`,
-    ].join("\n");
+/** Runs a powershell script handed over on stdin, so nothing in it can break out of a command line. */
+function powershell(script: string): Promise<void> {
     return new Promise((resolve, reject) => {
         const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "-"],
             { stdio: ["pipe", "ignore", "pipe"] });
@@ -76,6 +67,71 @@ function notify(title: string, message: string): Promise<void> {
     });
 }
 
+function xmlEscape(text: string): string {
+    return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+/**
+ * A Windows 10 toast with the frame as its hero image.
+ *
+ * Built from the toast xml directly rather than through a module, so there is nothing to install on
+ * the machine that shows it. The hero placement is the large picture across the top, which is the
+ * one thing a balloon cannot do and the reason this exists.
+ */
+function toast(title: string, message: string, imageFile: string | undefined): Promise<void> {
+    const hero = imageFile ? `<image placement="hero" src="file:///${xmlEscape(imageFile.replace(/\\/g, "/"))}"/>` : "";
+    const xml = `<toast scenario="reminder"><visual><binding template="ToastGeneric">`
+        + `<text>${xmlEscape(title)}</text><text>${xmlEscape(message)}</text>${hero}`
+        + `</binding></visual></toast>`;
+    const script = [
+        `[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null`,
+        `[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null`,
+        `$xml = New-Object Windows.Data.Xml.Dom.XmlDocument`,
+        `$xml.LoadXml('${xml.replace(/'/g, "''")}')`,
+        `$toast = New-Object Windows.UI.Notifications.ToastNotification $xml`,
+        `[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('${TOAST_APP_ID}').Show($toast)`,
+    ].join("\n");
+    return powershell(script);
+}
+
+/** The balloon from the toaster script, kept as the fallback: no picture, but it has never failed. */
+function balloon(title: string, message: string): Promise<void> {
+    const escape = (text: string) => text.replace(/'/g, "''");
+    return powershell([
+        `Add-Type -AssemblyName System.Windows.Forms`,
+        `$balloon = New-Object System.Windows.Forms.NotifyIcon`,
+        `$balloon.Icon = [System.Drawing.SystemIcons]::Information`,
+        `$balloon.BalloonTipTitle = '${escape(title)}'`,
+        `$balloon.BalloonTipText = '${escape(message)}'`,
+        `$balloon.Visible = $true`,
+        `$balloon.ShowBalloonTip(${BALLOON_MS})`,
+        `Start-Sleep -Milliseconds ${BALLOON_MS}`,
+        `$balloon.Dispose()`,
+    ].join("\n"));
+}
+
+/**
+ * Fetches the delivery's best frame to a local file, or explains why not.
+ *
+ * Kept, not cleaned up: they are one frame per delivery, deliveries are rare, and the folder is the
+ * only record on this machine of what was shown.
+ */
+async function fetchImage(url: string, password: string, delivery: Delivery): Promise<string | undefined> {
+    if (!delivery.image) {
+        return undefined;
+    }
+    const response = await fetch(`${url.replace(/\/+$/, "")}${delivery.image}`, {
+        headers: password ? { Authorization: `Bearer ${password}` } : {},
+    });
+    if (!response.ok) {
+        throw new Error(`the service answered ${response.status} for the frame`);
+    }
+    fs.mkdirSync(IMAGE_FOLDER, { recursive: true });
+    const file = path.join(IMAGE_FOLDER, `${delivery.t ?? Date.now()}.jpg`);
+    fs.writeFileSync(file, Buffer.from(await response.arrayBuffer()));
+    return file;
+}
+
 /**
  * Says when, with the date, and names the clip.
  *
@@ -84,16 +140,15 @@ function notify(title: string, message: string): Promise<void> {
  * clip finally arrived, and "10:25 am" read as today. A clip that arrives late is still worth
  * hearing about, but it has to say which day, and the file name is what you search for afterwards.
  */
-function describe(entry: EyeEntry): string {
-    const clip = (entry as EyeEntry & { delivery?: { clip?: string; t?: number } }).delivery;
-    const at = clip?.t ?? entry.at;
+function describe(entry: EyeEntry, delivery: Delivery): string {
+    const at = delivery.t ?? entry.at;
     const when = new Date(at);
     const today = new Date().toDateString() === when.toDateString();
     const day = today ? "today" : when.toDateString();
     const time = when.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
     const ago = Date.now() - at;
     const late = ago > 15 * 60 * 1000 ? ` (${Math.round(ago / 60_000)} minutes ago, the clip arrived late)` : "";
-    return `Package delivered at the door ${day} at ${time}${late}.${clip?.clip ? ` Clip ${clip.clip}` : ""}`;
+    return `Package delivered at the door ${day} at ${time}${late}.${delivery.clip ? ` Clip ${delivery.clip}` : ""}`;
 }
 
 function urlFrom(argv: string[]): string {
@@ -117,9 +172,28 @@ async function main() {
         onError: error => log(`${error.message}`),
     }).watch(DELIVERY_PHRASE, {
         onStart: entry => {
-            const message = describe(entry);
-            log(message);
-            notify("Package delivery", message).catch(error => log(`could not show the notification: ${error.message}`));
+            void (async () => {
+                const delivery = ((entry as EyeEntry & { delivery?: Delivery }).delivery) ?? {};
+                const message = describe(entry, delivery);
+                log(message);
+                let image: string | undefined;
+                try {
+                    image = await fetchImage(url, password, delivery);
+                    if (image) {
+                        log(`frame saved to ${image}`);
+                    }
+                } catch (error) {
+                    log(`could not fetch the frame, showing without it: ${(error as Error).message}`);
+                }
+                try {
+                    await toast("Package delivery", message, image);
+                } catch (error) {
+                    // The toast api is the only part of this that could be missing on a given
+                    // machine. The balloon has always worked, so the news still arrives.
+                    log(`toast failed, falling back to a balloon: ${(error as Error).message}`);
+                    await balloon("Package delivery", message).catch(inner => log(`could not show the notification: ${inner.message}`));
+                }
+            })();
         },
     });
 }

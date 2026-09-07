@@ -83,8 +83,11 @@ type Entry = {
     unknown?: string[];
     /** Exactly what the model said, so a parsing decision can always be second guessed later. */
     raw?: string;
-    /** Which door clip a reported delivery came from, and the frame that decided it. */
-    delivery?: { clip: string; t: number; frame?: string };
+    /**
+     * Which door clip a reported delivery came from, its best frame, and where to fetch that frame
+     * as a jpeg: a path under /delivery/ on this service, with the usual password.
+     */
+    delivery?: { clip: string; t: number; frame?: string; image?: string };
     promptTokens?: number;
     outputTokens?: number;
     /** Decoding the frame, which is the only part that is not the model. */
@@ -555,7 +558,9 @@ class Recorder {
             state,
             added,
             removed,
-            delivery: reporting ? { clip: reporting.clip, t: reporting.t, frame: reporting.frame } : undefined,
+            delivery: reporting
+                ? { clip: reporting.clip, t: reporting.t, frame: reporting.frame, image: reporting.image ? `/delivery/${reporting.image}` : undefined }
+                : undefined,
             unanswered,
             unknown,
             raw,
@@ -1670,6 +1675,20 @@ async function main() {
                 return;
             }
             send(405, { error: `Use GET, POST or DELETE on /questions` });
+            return;
+        }
+        // The best frame of a delivery, as a jpeg, for whatever shows the notification. Only frames
+        // under the door frames folder, by day, clip and name, and nothing that could climb out of it.
+        const deliveryFrame = /^\/delivery\/(\d{4}-\d{2}-\d{2})\/([^/]+)\/(\d{3}\.jpg)$/.exec(url.pathname);
+        if (deliveryFrame) {
+            const target = path.join(DOOR_FRAME_ROOT, deliveryFrame[1], deliveryFrame[2], deliveryFrame[3]);
+            if (!target.startsWith(DOOR_FRAME_ROOT + path.sep) || !fs.existsSync(target)) {
+                response.writeHead(404, { "Content-Type": "application/json" });
+                response.end(JSON.stringify({ error: "No such frame" }));
+                return;
+            }
+            response.writeHead(200, { "Content-Type": "image/jpeg", "Cache-Control": "private, max-age=86400, immutable" });
+            fs.createReadStream(target).pipe(response);
             return;
         }
         if (url.pathname === "/frames") {

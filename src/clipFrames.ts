@@ -158,12 +158,23 @@ function topBy(values: number[], count: number): number[] {
  * Measured against every hand labelled clip: this picks 8% of the frames and still lands on at least
  * one frame the model says yes to for all thirty deliveries.
  */
-export function selectFrames(grids: number[][], share = 0.35, perRun = 2): number[] {
+/**
+ * How far each frame is from the empty hallway. The higher, the more is going on in it, which is
+ * also what makes one frame a better picture of a delivery than another.
+ */
+export function frameScores(grids: number[][]): number[] {
     if (grids.length === 0) {
         return [];
     }
     const empty = background(grids);
-    const values = grids.map(grid => meanAbsolute(grid, empty));
+    return grids.map(grid => meanAbsolute(grid, empty));
+}
+
+export function selectFrames(grids: number[][], share = 0.35, perRun = 2): number[] {
+    if (grids.length === 0) {
+        return [];
+    }
+    const values = frameScores(grids);
     const highest = Math.max(...values);
     if (highest <= 0) {
         return [0];

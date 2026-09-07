@@ -1,6 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
-import { extractClipFrames, selectFrames, ClipFrames } from "./clipFrames";
+import { extractClipFrames, selectFrames, frameScores, ClipFrames } from "./clipFrames";
 
 /**
  * Watches the door clips as they arrive and decides whether each one is a delivery.
@@ -64,8 +64,10 @@ export type Verdict = {
     /** The clip's peak time, its identity everywhere else. */
     t: number;
     delivery: boolean;
-    /** The frame that decided it, when it was a delivery. */
+    /** The best frame of the delivery, when it was one: of those that said yes, the busiest. */
     frame?: string;
+    /** That frame's jpeg, as day/clip/frame under the frames folder. Served by the actions service. */
+    image?: string;
     /** How many frames the clip had, one a second. */
     frames: number;
     /** The frames chosen to be asked about, whether or not all were reached. */
@@ -233,7 +235,7 @@ export class DeliveryWatcher {
         }
         const index = clip.remaining.shift();
         if (index === undefined) {
-            return this.settle(clip, false);
+            return this.settle(clip);
         }
         const name = clip.frames.frames[index];
         const jpeg = fs.readFileSync(path.join(this.frameRoot, clip.day, clip.file.replace(/\.mp4$/, ""), name));
@@ -255,23 +257,38 @@ export class DeliveryWatcher {
         clip.answers.push({ frame: name, answer, yes, ms: Date.now() - startedAtMs });
         this.log(`door clip ${clip.day}/${clip.file}: ${name} -> ${JSON.stringify(answer)}`
             + ` (${yes ? "yes" : "no"}, ${Date.now() - startedAtMs}ms)`);
-        if (yes) {
-            // One frame is enough. Everything after it could only agree.
-            return this.settle(clip, true, name);
-        }
+        // Every chosen frame is asked, even after a yes. One yes is enough to know it is a delivery,
+        // but the picture that goes out with the notification should be the best of the frames that
+        // said so, and the only way to have more than one to choose from is to keep asking. The
+        // chosen frames are two or three per clip and deliveries are rare, so this costs nothing.
         if (clip.remaining.length === 0) {
-            return this.settle(clip, false);
+            return this.settle(clip);
         }
         return undefined;
     }
 
-    private settle(clip: Pending, delivery: boolean, frame?: string): Verdict {
+    private settle(clip: Pending): Verdict {
         this.current = undefined;
+        const delivery = clip.answers.some(answer => answer.yes);
+        // Of the frames that said yes, the one furthest from the empty hallway: the most of the
+        // person and whatever they carried in the picture. That is the frame worth showing.
+        const scores = frameScores(clip.frames.grids);
+        let frame: string | undefined;
+        let best = -1;
+        for (const answer of clip.answers) {
+            const score = scores[clip.frames.frames.indexOf(answer.frame)] ?? 0;
+            if (answer.yes && score > best) {
+                best = score;
+                frame = answer.frame;
+            }
+        }
+        const stem = clip.file.replace(/\.mp4$/, "");
         const verdict: Verdict = {
             clip: `${clip.day}/${clip.file}`,
             t: clip.t,
             delivery,
             frame,
+            image: frame ? `${clip.day}/${stem}/${frame}` : undefined,
             frames: clip.frames.frames.length,
             selected: clip.selected,
             answers: clip.answers,
