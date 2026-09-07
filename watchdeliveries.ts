@@ -76,10 +76,24 @@ function notify(title: string, message: string): Promise<void> {
     });
 }
 
+/**
+ * Says when, with the date, and names the clip.
+ *
+ * The first version printed only a time. The sync to the camera had been down for a day, so the
+ * first thing this ever announced was a delivery from the previous morning, judged the moment its
+ * clip finally arrived, and "10:25 am" read as today. A clip that arrives late is still worth
+ * hearing about, but it has to say which day, and the file name is what you search for afterwards.
+ */
 function describe(entry: EyeEntry): string {
     const clip = (entry as EyeEntry & { delivery?: { clip?: string; t?: number } }).delivery;
-    const when = clip?.t ? formatDateTime(clip.t) : formatDateTime(entry.at);
-    return `A package was delivered at the door at ${when}.`;
+    const at = clip?.t ?? entry.at;
+    const when = new Date(at);
+    const today = new Date().toDateString() === when.toDateString();
+    const day = today ? "today" : when.toDateString();
+    const time = when.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    const ago = Date.now() - at;
+    const late = ago > 15 * 60 * 1000 ? ` (${Math.round(ago / 60_000)} minutes ago, the clip arrived late)` : "";
+    return `Package delivered at the door ${day} at ${time}${late}.${clip?.clip ? ` Clip ${clip.clip}` : ""}`;
 }
 
 function urlFrom(argv: string[]): string {
