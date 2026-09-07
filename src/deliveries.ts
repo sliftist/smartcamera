@@ -100,6 +100,7 @@ export class DeliveryWatcher {
     /** Clips already judged or in hand, so a scan never picks one up twice. */
     private seen = new Set<number>();
     private scanning = false;
+    private readonly startedAtMs = Date.now();
     private timer: ReturnType<typeof setInterval> | undefined;
     judged = 0;
     found = 0;
@@ -142,17 +143,32 @@ export class DeliveryWatcher {
         }
         this.scanning = true;
         try {
-            const since = Date.now() - CATCH_UP_MS;
+            // Measured against when the clip file arrived, not when the clip was recorded. The sync
+            // to the camera can be down for hours, and the clips then land late with old times in
+            // their names. Those are exactly the deliveries nobody has been told about yet, so a late
+            // arrival is judged whatever its timestamp. Only files that were already here and old
+            // when this started are left alone.
+            const since = this.startedAtMs - CATCH_UP_MS;
             let days: string[];
             try {
-                days = fs.readdirSync(this.clipRoot).filter(name => DAY_FOLDER.test(name)).sort().slice(-2);
+                days = fs.readdirSync(this.clipRoot).filter(name => DAY_FOLDER.test(name)).sort().slice(-3);
             } catch {
                 return;
             }
             for (const day of days) {
                 for (const file of fs.readdirSync(path.join(this.clipRoot, day)).filter(name => CLIP_NAME.test(name)).sort()) {
                     const t = Number(CLIP_NAME.exec(file)![1]);
-                    if (this.seen.has(t) || t < since) {
+                    if (this.seen.has(t)) {
+                        continue;
+                    }
+                    let arrivedAtMs = 0;
+                    try {
+                        arrivedAtMs = fs.statSync(path.join(this.clipRoot, day, file)).mtimeMs;
+                    } catch {
+                        continue;
+                    }
+                    if (arrivedAtMs < since) {
+                        this.seen.add(t);
                         continue;
                     }
                     this.seen.add(t);

@@ -86,6 +86,17 @@ export class DoorClient {
         socket?.close();
     }
 
+    /**
+     * Whether a call could be sent right now.
+     *
+     * The camera reboots itself every morning and closes every connection when it does. A client
+     * whose socket has closed underneath it is not going to recover on its own, and calling on it
+     * only produces "not connected" forever. The holder has to notice and make a new one.
+     */
+    get alive(): boolean {
+        return this.socket !== undefined && this.socket.readyState === WebSocket.OPEN;
+    }
+
     call<T>(method: string, ...args: unknown[]): Promise<T> {
         const socket = this.socket;
         if (!socket || socket.readyState !== WebSocket.OPEN) {

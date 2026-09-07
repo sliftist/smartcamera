@@ -102,6 +102,13 @@ class Sync {
     constructor(private store: ClipStore, private password: string) {}
 
     private async connected(): Promise<DoorClient> {
+        // A client whose socket closed under it is thrown away here rather than handed back. The
+        // camera reboots every morning and closes every connection when it does; the first version
+        // of this kept the dead client and retried on it for forty hours, failing every fifteen
+        // seconds with "not connected" and never once trying to connect.
+        if (this.client && !this.client.alive) {
+            this.drop(new Error(`the connection to the camera had closed`));
+        }
         if (this.client) {
             return this.client;
         }
@@ -112,7 +119,7 @@ class Sync {
         return client;
     }
 
-    private drop(error: Error) {
+    drop(error: Error) {
         this.client?.close();
         this.client = undefined;
         log(`lost the camera: ${error.message}`);
@@ -268,6 +275,8 @@ async function watch(sync: Sync, store: ClipStore) {
             }
             seenTo = now;
         } catch (error) {
+            // Whatever failed, the connection is not trusted afterwards. The next pass makes a new one.
+            sync.drop(error as Error);
             log(`pass failed, retrying in ${RECONNECT_MS / 1000}s: ${(error as Error).message}`);
             await new Promise(resolve => setTimeout(resolve, RECONNECT_MS));
             continue;
