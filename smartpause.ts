@@ -148,10 +148,16 @@ async function main() {
             log(connected ? `connected` : `disconnected${reason ? `: ${reason}` : ""}, retrying`),
         onError: error => log(`${error.message}`),
     }).watch(PHRASE, {
-        onStart: () => {
+        // Every event is logged as it arrives, with what the model actually said that round, before
+        // anything is done about it. The lines below say what was done; these say what came in. Both
+        // are needed: a run of flips is only visible as flips if the ons are written down as well as
+        // the offs, and the raw answer is what shows why the model changed its mind.
+        onStart: entry => {
+            log(`event: headphones on   (model said ${JSON.stringify(entry.raw ?? "")})`);
             pauser.on().catch(error => log(`resume failed: ${(error as Error).stack ?? error}`));
         },
-        onStop: () => {
+        onStop: entry => {
+            log(`event: headphones off  (model said ${JSON.stringify(entry.raw ?? "")})`);
             pauser.off().catch(error => log(`pause failed: ${(error as Error).stack ?? error}`));
         },
     });
