@@ -64,6 +64,11 @@ class Pauser {
 
     async on() {
         if (this.paused.length === 0) {
+            // Said, because silence here made the log lie. With nothing paused this used to return
+            // without a word, so a run of "off, nothing was playing" every few seconds read as the
+            // service saying off over and over, when the service was in fact alternating on and off
+            // and every one of the ons was landing here unrecorded.
+            log(`headphones back on, nothing to resume`);
             this.nothingPlayingAtMs = 0;
             return;
         }
