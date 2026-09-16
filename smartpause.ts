@@ -74,7 +74,7 @@ class Pauser {
             return;
         }
         const skipped = result.skipped.length > 0
-            ? `, left ${result.skipped.join(", ")} alone because something else changed it`
+            ? `, ${result.skipped.join(", ")} refused to resume`
             : "";
         const failed = result.failed.length > 0 ? `, failed on ${result.failed.join("; ")}` : "";
         log(`headphones back on, resumed ${result.changed.join(", ") || "nothing"}${skipped}${failed}`

@@ -59,7 +59,6 @@ function Get-Manager {
     return $script:manager
 }
 $playing = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionPlaybackStatus]::Playing
-$paused = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionPlaybackStatus]::Paused
 
 function Send($payload) {
     # Written straight to the console and flushed, because the pipeline buffers and a caller waiting on
@@ -113,11 +112,10 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
                         $changed += $appId
                     }
                 } elseif ($action -eq "play" -and $wanted -contains $appId) {
-                    # Anything that is no longer paused was resumed by someone else, so leave it alone.
-                    if ($status -ne $paused) {
-                        $skipped += $appId
-                    } elseif (Await ($session.TryPlayAsync()) ([bool])) {
+                    if (Await ($session.TryPlayAsync()) ([bool])) {
                         $changed += $appId
+                    } else {
+                        $skipped += $appId
                     }
                 }
             } catch {

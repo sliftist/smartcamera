@@ -187,7 +187,7 @@ export function pausePlayingMedia(): Promise<MediaChange> {
     return host.send("pause", []);
 }
 
-/** Resumes only the given sessions, and only those still paused, so nothing we did not pause gets started. */
+/** Resumes only the given sessions, so nothing we did not pause gets started. */
 export function resumeMedia(appIds: string[]): Promise<MediaChange> {
     if (appIds.length === 0) {
         return Promise.resolve({ changed: [], skipped: [], failed: [], sessions: [] });
