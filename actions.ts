@@ -37,8 +37,11 @@ const FAILURE_BACKOFF_MS = 3_000;
  * point of the log is the text; keeping every frame at this rate would be gigabytes a day. Holding a
  * short tail is what makes it possible to look back at what the model was describing and say what it
  * missed, which is the only frame worth saving.
+ *
+ * Fifteen minutes, at one frame a second and roughly 100KB a frame, is about 90MB held in memory.
+ * Long enough that something noticed a while after it happened can still be looked at.
  */
-const FRAME_BUFFER_MS = 30_000;
+const FRAME_BUFFER_MS = 15 * 60 * 1000;
 /**
  * Frames are pulled on their own clock rather than one per answer. Tying them to rounds gave a frame
  * only every 1.4s and, worse, tied what is kept to what the model happened to be asked about.

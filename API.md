@@ -199,7 +199,7 @@ all that stands between it and the internet. A connection from outside 10/8, 192
 
     GET /status                     rounds, failures, the questions, which are yes, the live prompt
     GET /log?since=<ms>&limit=<n>   recent entries as json
-    GET /frames                     the last 30s of frames held in memory
+    GET /frames                     the last 15 minutes of frames held in memory, one a second
     GET /frames/<id>                one of them as a jpeg
     POST /annotate {"id","note"}    save a frame plus what the model missed, for training
 
