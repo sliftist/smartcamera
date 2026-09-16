@@ -30,6 +30,8 @@ const PASSWORD_FILE = path.join(os.homedir(), "smartcamerapassword.txt");
 const PASSWORD_POLL_MS = 5000;
 /** Once Windows says nothing is playing, wait before asking it again rather than spawning powershell. */
 const RETRY_PAUSE_MS = 30 * 1000;
+/** How long a change must hold before it is acted on: about three rounds of the model. */
+const HOLD_MS = 1500;
 
 function log(message: string) {
     console.log(`${formatDateTime(Date.now())} | ${message}`);
@@ -143,13 +145,41 @@ async function main() {
             log(connected ? `connected` : `disconnected${reason ? `: ${reason}` : ""}, retrying`),
         onError: error => log(`${error.message}`),
     }).watch(PHRASE, {
-        onStart: () => {
-            pauser.on().catch(error => log(`resume failed: ${(error as Error).stack ?? error}`));
-        },
-        onStop: () => {
-            pauser.off().catch(error => log(`pause failed: ${(error as Error).stack ?? error}`));
-        },
+        onStart: () => steady.set(true),
+        onStop: () => steady.set(false),
     });
+
+    /**
+     * Acts on a change only once it has held for a moment.
+     *
+     * The model answers about twice a second and its answer flickers: on an evening with the room
+     * lit oddly it flipped the headphones question forty times a minute, with the person never
+     * touching them. Acting on every flip paused and resumed Spotify in a loop and logged "nothing
+     * was playing" every few seconds. A real removal holds for many rounds; a flicker reverts within
+     * one or two. Waiting three rounds tells them apart and costs a second and a half on a real
+     * change, which is the least that survives a one round flicker.
+     */
+    const steady = new (class {
+        private wanted: boolean | undefined;
+        private acted: boolean | undefined;
+        private timer: ReturnType<typeof setTimeout> | undefined;
+
+        set(on: boolean) {
+            this.wanted = on;
+            if (this.timer) {
+                clearTimeout(this.timer);
+            }
+            this.timer = setTimeout(() => {
+                this.timer = undefined;
+                if (this.wanted === this.acted) {
+                    return;
+                }
+                this.acted = this.wanted;
+                const run = this.wanted ? pauser.on() : pauser.off();
+                run.catch(error => log(`${this.wanted ? "resume" : "pause"} failed: ${(error as Error).stack ?? error}`));
+            }, HOLD_MS);
+        }
+    })();
 }
 
 process.on("unhandledRejection", error => {
