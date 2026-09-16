@@ -46,17 +46,12 @@ be removed: a DELETE naming one is accepted and changes nothing, and the page sh
 with no cross. Removing one could only mean it disappears until the next restart, which is worse than
 not being able to.
 
-    is a person present (person)
-    is anyone drinking (drinking)
-    is a hand on the mouse (mouse)
-    is anyone typing (typing)
-    is anyone eating (eating)
     is anyone wearing headphones (headphones)
-    is wearing shirt (shirt)
-    is the door open (door)
-    is well lit (lit)
-    head tilted back with hands on face (tilted)
-    brushing teeth with electric toothbrush (toothbrush)
+
+Just the one. There were eleven, and nothing was using the other ten. With a single question the
+prompt is that question and "answer with one word, yes or no", and the answer is one word. The list
+form below only comes back if something registers a second phrase. Either way the prompt is
+stateless: what was true last round is never mentioned, so an answer can only come from the frame.
 
 The answer is the words of the true ones and nothing else, so anything left out is a no. A still room
 costs about five output tokens rather than one per question, and generating was a third of a frame's

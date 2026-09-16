@@ -39,17 +39,10 @@ export type Watch = {
  * grew, and each entry costs tokens on every single frame.
  */
 export const DEFAULT_PHRASES = [
-    "is a person present (person)",
-    "is anyone drinking (drinking)",
-    "is a hand on the mouse (mouse)",
-    "is anyone typing (typing)",
-    "is anyone eating (eating)",
+    // Just the one. There were eleven, and nothing was using the other ten: every frame paid for
+    // them, and the answer list changing under a question nobody was watching was noise in the log.
+    // One question gets a one word prompt and a one word answer, see buildPrompt.
     "is anyone wearing headphones (headphones)",
-    "is wearing shirt (shirt)",
-    "is the door open (door)",
-    "is well lit (lit)",
-    "head tilted back with hands on face (tilted)",
-    "brushing teeth with electric toothbrush (toothbrush)",
 ];
 
 /** Named because smartpause watches exactly this one, so a reword here cannot orphan it there. */
@@ -139,7 +132,18 @@ export function parseWatch(phrase: string): Watch {
         + ` parentheses at the end, like "is eating pizza (pizza)"`);
 }
 
+/**
+ * Stateless, in either form: the prompt is the question and nothing else. What was true last round
+ * is never mentioned, so an answer can only come from the frame in front of it.
+ */
 export function buildPrompt(watches: Watch[]): string {
+    // One question gets asked as a question and answered with a word. The list format below exists
+    // to get several answers out of one round; for a single question it is only ceremony, and the
+    // model is at its most reliable answering the plainest possible yes or no.
+    if (watches.length === 1) {
+        const question = watches[0].question.replace(/\?$/, "");
+        return `${question.charAt(0).toUpperCase()}${question.slice(1)}?\nAnswer with one word, yes or no.`;
+    }
     return [
         `For each of the following, decide whether it is true of this image.`,
         ``,
@@ -170,6 +174,19 @@ export function parseAnswers(reply: string, watches: Watch[]): Answers {
     const words = reply.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
     if (words.length === 0) {
         return { yes: [], answered: [], unknown: [] };
+    }
+    // The one question form: the answer is yes or no. Its own keyword is taken as a yes too, since a
+    // model told to say yes will sometimes say the thing it is saying yes about instead.
+    if (watches.length === 1) {
+        const first = words[0];
+        if (first.startsWith("y") || first === watches[0].keyword) {
+            return { yes: [...phrases], answered: [...phrases], unknown: [] };
+        }
+        if (first.startsWith("n")) {
+            return { yes: [], answered: [...phrases], unknown: [] };
+        }
+        // Neither. Not an answer, so nothing changes, and the word is shown so it can be seen.
+        return { yes: [], answered: [], unknown: [first] };
     }
     // Everything was decided and nothing was true. Checked before any matching, since a keyword could
     // otherwise be found inside it.
