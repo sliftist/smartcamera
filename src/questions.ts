@@ -59,6 +59,18 @@ export const HEADPHONES_PHRASE = "is anyone wearing headphones (headphones)";
  */
 export const DELIVERY_PHRASE = "package delivery at the door (delivery)";
 
+/**
+ * How a question is actually put to the model when it is the only one, where that should differ
+ * from the phrase itself.
+ *
+ * The phrase is an identity: it names the thing in day files, in every client, and in the history,
+ * and cannot be reworded without orphaning all of that. The wording the model sees can be tuned
+ * freely, and this is where. Anything not listed here is asked as its own question.
+ */
+const PROMPT_WORDING: Record<string, string> = {
+    [HEADPHONES_PHRASE]: "Is there a person wearing headphones in the shot?",
+};
+
 export const MAX_QUESTIONS = 26;
 export const MAX_PHRASE_LENGTH = 140;
 export const MAX_KEYWORD_LENGTH = 24;
@@ -142,7 +154,8 @@ export function buildPrompt(watches: Watch[]): string {
     // model is at its most reliable answering the plainest possible yes or no.
     if (watches.length === 1) {
         const question = watches[0].question.replace(/\?$/, "");
-        return `${question.charAt(0).toUpperCase()}${question.slice(1)}?\nAnswer with one word, yes or no.`;
+        const asked = PROMPT_WORDING[watches[0].phrase] ?? `${question.charAt(0).toUpperCase()}${question.slice(1)}?`;
+        return `${asked}\nAnswer with one word, yes or no.`;
     }
     return [
         `For each of the following, decide whether it is true of this image.`,
