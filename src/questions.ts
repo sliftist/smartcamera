@@ -60,15 +60,15 @@ export const HEADPHONES_PHRASE = "is anyone wearing headphones (headphones)";
 export const DELIVERY_PHRASE = "package delivery at the door (delivery)";
 
 /**
- * How a question is actually put to the model when it is the only one, where that should differ
- * from the phrase itself.
+ * The whole prompt for a question when it is the only one being asked, where that should differ
+ * from the phrase itself. Used verbatim, nothing added.
  *
  * The phrase is an identity: it names the thing in day files, in every client, and in the history,
  * and cannot be reworded without orphaning all of that. The wording the model sees can be tuned
  * freely, and this is where. Anything not listed here is asked as its own question.
  */
 const PROMPT_WORDING: Record<string, string> = {
-    [HEADPHONES_PHRASE]: "Is there a person wearing headphones in the shot?",
+    [HEADPHONES_PHRASE]: "Is there a person wearing headphones? Answer one word, yes or no. No explanation, no preamble, no user interaction",
 };
 
 export const MAX_QUESTIONS = 26;
@@ -153,9 +153,13 @@ export function buildPrompt(watches: Watch[]): string {
     // to get several answers out of one round; for a single question it is only ceremony, and the
     // model is at its most reliable answering the plainest possible yes or no.
     if (watches.length === 1) {
+        // A listed wording is the whole prompt, verbatim. Nothing is added to it.
+        const listed = PROMPT_WORDING[watches[0].phrase];
+        if (listed) {
+            return listed;
+        }
         const question = watches[0].question.replace(/\?$/, "");
-        const asked = PROMPT_WORDING[watches[0].phrase] ?? `${question.charAt(0).toUpperCase()}${question.slice(1)}?`;
-        return `${asked}\nAnswer with one word, yes or no.`;
+        return `${question.charAt(0).toUpperCase()}${question.slice(1)}?\nAnswer with one word, yes or no.`;
     }
     return [
         `For each of the following, decide whether it is true of this image.`,
